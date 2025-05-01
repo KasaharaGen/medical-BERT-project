@@ -1,35 +1,32 @@
-#medical-BERT-project
-# ディレクトリ構成:
-# project/
-# ├── pretrain/train_mlm.py
-# ├── finetune/train_classifier.py
-# ├── tokenizer/train_tokenizer.py
-# ├── utils/dataset.py
-# ├── deploy/app.py
-# ├── data/epmc_fulltext.csv
-# └── data/ehr_train.csv
+# 🧠 BERT-based Disease Classification from Medical Records (研究目的)
 
-# このプロジェクトは、論文のMLM事前学習と電子カルテの病気分類に分かれた次のステップで構成される:
+本プロジェクトは、**医療論文を用いたBERTモデルの事前学習**と、**電子カルテ（EHR）に基づく疾患分類モデルの構築**を目的としています。  
+商用利用は想定せず、研究目的に限って開発・検証されています。
 
-# === 1. 論文MLM事前学習 ===
-# train_mlm.py
-# - SentencePiece tokenizerでの分かち込み
-# - BERTEncoderのMLM学習
+## 🔁 プロジェクト構成
+project/ ├── data/ │ ├── epmc_fulltext.csv # 医療論文（事前学習用） │ └── ehr_train.csv # 電子カルテ（分類タスク用） ├── tokenizer/ │ └── train_tokenizer.py # SentencePieceトークナイザの学習 ├── pretrain/ │ └── train_mlm.py # 論文コーパスによるMLM学習（自作BERT） ├── finetune/ │ └── train_classifier.py # 疾患分類モデルのファインチューニング ├── utils/ │ └── dataset.py # Dataset定義（事前学習・分類用） └── deploy/ └── app.py # FastAPIによるAPIデプロイ
 
-# === 2. 電子カルテ分類 ===
-# train_classifier.py
-# - BERTベースのファインチューニング
-# - EHRデータを用いたラベル分類
+## 📚 モデル構築フロー
 
-# === 3. デプロイ ===
-# app.py
-# - FastAPI を使用した接続APIの実装
+1. **SentencePieceトークナイザの学習**  
+   `tokenizer/train_tokenizer.py` で独自の語彙辞書を学習します。
 
-# === 4. トークナイザー ===
-# train_tokenizer.py
-# - SentencePiece でトークナイザの訓練
+2. **医療論文コーパスでBERTを事前学習**  
+   `pretrain/train_mlm.py` でMLM（Masked Language Modeling）により、自作BERTを訓練します。
 
-# === 5. データセット ===
-# dataset.py
-# - 事前学習用コーパス
-# - 病気分類用Datasetの定義
+3. **電子カルテによる疾患分類ファインチューニング**  
+   `finetune/train_classifier.py` で医療テキストから疾患（例：デング熱）を分類します。
+
+4. **FastAPIによるモデルAPIの提供**  
+   `deploy/app.py` を用いてWebサービスとして推論APIを構築します。
+
+## ⚠️ 免責事項
+
+- このプロジェクトは研究目的にのみ使用されます。
+- 医療診断を目的とした臨床使用や商用利用は行いません。
+- データセット（epmc_fulltext.csv, ehr_train.csv）は著作権・利用制限に配慮して管理してください。
+
+## 📩 開発・問い合わせ
+
+研究・学術交流目的の利用に関心がある方はご連絡ください。
+
