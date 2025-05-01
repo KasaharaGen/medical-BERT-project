@@ -60,7 +60,7 @@ def fetch_html_text(pmcid):
         print(f"[ERROR] HTML fetch failed: {e}")
         return ""
 
-def fetch_epmc_metadata(query, max_results=1000, page_size=1000):
+def fetch_epmc_metadata(query, max_results=10000000, page_size=1000):
     cursor = "*"
     results = []
     with tqdm(total=max_results, desc="Fetching metadata") as pbar:
