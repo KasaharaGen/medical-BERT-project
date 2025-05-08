@@ -1,65 +1,97 @@
 import pandas as pd
-from datasets import Dataset
-from transformers import BertTokenizerFast, BertForMaskedLM, DataCollatorForLanguageModeling
-from transformers import Trainer, TrainingArguments
 import torch
+from torch.utils.data import Dataset, DataLoader
+import torch.nn as nn
+from transformers import PreTrainedTokenizerFast
+from tqdm import tqdm
 import os
+from model import MyBERTConfig, MyBERTForMaskedLM
+import sentencepiece as spm
 
 # === 設定 ===
-INPUT_CSV = "../data/ner_context_blocks.csv"
-MODEL_NAME = "bert-base-uncased"  # 自作BERTに切り替え可
-OUTPUT_DIR = "./checkpoints/bert_mlm"
-BLOCK_COLUMN = "block"
-MAX_LENGTH = 128
+CSV_PATH = "../data/merged_blocks.csv"
+CHECKPOINT_DIR = "./checkpoints/mybert"
+SP_MODEL_PATH = "./tokenizer/mybert_tokenizer.model"
+MAX_LEN = 128
+BATCH_SIZE = 16
+EPOCHS = 5
 MLM_PROB = 0.15
-NUM_EPOCHS = 5
-PER_DEVICE_BATCH_SIZE = 8
-USE_MULTIGPU = torch.cuda.device_count() > 1
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+MULTIGPU = torch.cuda.device_count() > 1
 
-# === データ読み込み ===
-df = pd.read_csv(INPUT_CSV)
-df = df[df[BLOCK_COLUMN].notna() & (df[BLOCK_COLUMN].str.strip() != "")]
-dataset = Dataset.from_pandas(df[[BLOCK_COLUMN]].rename(columns={BLOCK_COLUMN: "text"}))
+# === データセット ===
+class MLMDataset(Dataset):
+    def __init__(self, texts, tokenizer):
+        self.tokenizer = tokenizer
+        self.inputs = tokenizer(texts, truncation=True, padding='max_length', max_length=MAX_LEN, return_tensors='pt')
+        self.input_ids = self.inputs['input_ids']
+        self.token_type_ids = self.inputs['token_type_ids'] if 'token_type_ids' in self.inputs else torch.zeros_like(self.input_ids)
+        self.attention_mask = self.inputs['attention_mask']
 
-# === トークナイズ ===
-tokenizer = BertTokenizerFast.from_pretrained(MODEL_NAME)
-def tokenize_fn(example):
-    return tokenizer(example["text"], truncation=True, padding="max_length", max_length=MAX_LENGTH)
-tokenized = dataset.map(tokenize_fn, batched=True, remove_columns=["text"])
+    def __len__(self):
+        return len(self.input_ids)
 
-# === データコラレータ ===
-data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=True, mlm_probability=MLM_PROB)
+    def mask_tokens(self, inputs):
+        labels = inputs.clone()
+        probability_matrix = torch.full(labels.shape, MLM_PROB)
+        special_tokens_mask = [self.tokenizer.get_special_tokens_mask(val, already_has_special_tokens=True) for val in labels.tolist()]
+        probability_matrix.masked_fill_(torch.tensor(special_tokens_mask, dtype=torch.bool), value=0.0)
+        masked_indices = torch.bernoulli(probability_matrix).bool()
+        inputs[masked_indices] = self.tokenizer.convert_tokens_to_ids(self.tokenizer.mask_token)
+        labels[~masked_indices] = -100
+        return inputs, labels
 
-# === モデル準備 ===
-model = BertForMaskedLM.from_pretrained(MODEL_NAME)
-if USE_MULTIGPU:
-    model = torch.nn.DataParallel(model)
+    def __getitem__(self, idx):
+        input_ids = self.input_ids[idx].clone()
+        input_ids_masked, labels = self.mask_tokens(input_ids)
+        return {
+            'input_ids': input_ids_masked,
+            'token_type_ids': self.token_type_ids[idx],
+            'attention_mask': self.attention_mask[idx],
+            'labels': labels
+        }
 
-# === 学習設定 ===
-training_args = TrainingArguments(
-    output_dir=OUTPUT_DIR,
-    per_device_train_batch_size=PER_DEVICE_BATCH_SIZE,
-    num_train_epochs=NUM_EPOCHS,
-    save_steps=1000,
-    save_total_limit=2,
-    prediction_loss_only=True,
-    fp16=True if torch.cuda.is_available() else False,
-    logging_dir=os.path.join(OUTPUT_DIR, "logs"),
-    logging_steps=100,
-    report_to="none"
-)
+# === データ準備 ===
+df = pd.read_csv(CSV_PATH)
+df = df[df['sentence'].notna() & (df['sentence'].str.strip() != "")]
+texts = df['sentence'].tolist()
+print(f"📚 データ読み込み完了: {len(texts)} 件")
 
-# === Trainer実行 ===
-trainer = Trainer(
-    model=model,
-    args=training_args,
-    train_dataset=tokenized,
-    tokenizer=tokenizer,
-    data_collator=data_collator,
-)
+# === 自作トークナイザ読み込み ===
+tokenizer = PreTrainedTokenizerFast(tokenizer_file=SP_MODEL_PATH)
+tokenizer.mask_token = "[MASK]"
+tokenizer.pad_token = "[PAD]"
+tokenizer.cls_token = "[CLS]"
+tokenizer.sep_token = "[SEP]"
+tokenizer.unk_token = "[UNK]"
 
-print(f"🚀 学習開始 (GPU: {torch.cuda.device_count()}枚)")
-trainer.train()
-print("✅ MLM学習完了")
-trainer.save_model(OUTPUT_DIR)
-print(f"💾 モデル保存完了: {OUTPUT_DIR}")
+# === モデル構築 ===
+config = MyBERTConfig(vocab_size=tokenizer.vocab_size)
+model = MyBERTForMaskedLM(config)
+if MULTIGPU:
+    model = nn.DataParallel(model)
+model.to(DEVICE)
+
+# === 学習ループ ===
+dataset = MLMDataset(texts, tokenizer)
+dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
+optimizer = torch.optim.Adam(model.parameters(), lr=5e-5)
+
+model.train()
+for epoch in range(EPOCHS):
+    total_loss = 0
+    for batch in tqdm(dataloader, desc=f"Epoch {epoch+1}"):
+        batch = {k: v.to(DEVICE) for k, v in batch.items()}
+        outputs = model(**batch)
+        loss = nn.CrossEntropyLoss()(outputs.view(-1, tokenizer.vocab_size), batch['labels'].view(-1))
+        loss.backward()
+        optimizer.step()
+        optimizer.zero_grad()
+        total_loss += loss.item()
+    avg = total_loss / len(dataloader)
+    print(f"✅ Epoch {epoch+1}: Loss = {avg:.4f}")
+
+# === モデル保存 ===
+os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+torch.save(model.state_dict(), os.path.join(CHECKPOINT_DIR, "mybert_mlm.pt"))
+print(f"💾 モデル保存完了: {CHECKPOINT_DIR}/mybert_mlm.pt")
