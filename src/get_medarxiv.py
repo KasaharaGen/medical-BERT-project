@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 BASE_URL = "https://api.biorxiv.org/details/medrxiv/2015-01-01/2025-04-24/{}"
 MAX_RESULTS = 10000000
 PAGE_SIZE = 100
-KEYWORDS = ["dengue", "covid19", "malaria", "sars coronavirus", "mars coronavirus"]
+KEYWORDS = ["dengue", "covid19", "malaria", "full", "sars coronavirus", "mars coronavirus"]
 KEYWORDS_NORMALIZED = [kw.lower() for kw in KEYWORDS]
 OUTPUT_PATH = "../data/medrxiv_fulltext.csv"
 METADATA_PATH = "../data/metadata/medrxiv_filtered_metadata.csv"
@@ -32,9 +32,12 @@ def fetch_with_retry(url, max_retries=3, sleep_sec=3):
             res = requests.get(url, timeout=10)
             res.raise_for_status()
             return res
-        except Exception as e:
+        except requests.exceptions.RequestException as e:
             print(f"[WARN] Retry {i+1}/{max_retries} failed for {url}: {e}")
             time.sleep(sleep_sec)
+        except Exception as e:
+            print(f"[ERROR] Non-retryable error for {url}: {e}")
+            break
     return None
 
 def fetch_jats_xml(jats_url):

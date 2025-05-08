@@ -7,9 +7,9 @@ import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 BASE_URL = "https://api.biorxiv.org/details/biorxiv/2015-01-01/2025-04-24/{}"
-MAX_RESULTS = 100000
+MAX_RESULTS = 10000000
 PAGE_SIZE = 100
-KEYWORDS = ["dengue", "covid19", "malaria", "sars coronavirus", "mars coronavirus"]
+KEYWORDS = ["dengue", "covid19", "malaria", "full", "sars coronavirus", "mars coronavirus"]
 KEYWORDS_NORMALIZED = [kw.lower() for kw in KEYWORDS]
 OUTPUT_PATH = "../data/biorxiv_fulltext.csv"
 METADATA_PATH = "../data/metadata/biorxiv_filtered_metadata.csv"
