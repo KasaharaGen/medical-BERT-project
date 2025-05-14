@@ -51,8 +51,8 @@ def objective(trial):
     # Training設定
     training_args = TrainingArguments(
         output_dir=f"{MODEL_OUTPUT_DIR}/trial_{trial.number}",
-        per_device_train_batch_size=16,
-        num_train_epochs=1,  # チューニング時は短く（後で本学習）
+        per_device_train_batch_size=252,
+        num_train_epochs=2,  # チューニング時は短く（後で本学習）
         learning_rate=learning_rate,
         weight_decay=weight_decay,
         warmup_steps=500,
