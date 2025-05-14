@@ -7,7 +7,7 @@ from transformers import pipeline, AutoTokenizer, AutoModelForTokenClassificatio
 NER_MODEL = "d4data/biomedical-ner-all"
 THRESHOLD = 0.5
 
-TERMS = ["dengue", "covid19", "malaria", "sars coronavirus", "mars coronavirus"]
+TERMS = ["dengue", "covid19", "malaria","full", "sars coronavirus", "mars coronavirus"]
     
 PATTERN = re.compile(r'\b(' + '|'.join(re.escape(term.lower()) for term in TERMS) + r')\b')
 

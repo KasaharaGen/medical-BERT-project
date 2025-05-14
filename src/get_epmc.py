@@ -45,7 +45,7 @@ def fetch_fulltext_xml(source, pmcid):
 
 def fetch_html_text(pmcid):
     try:
-        url = f"https://www.ncbi.nlm.nih.gov/pmc/articles/PMC{pmcid}/"
+        url = f"https://www.ncbi.nlm.nih.gov/pmc/articles/pmc{pmcid}/"
         headers = {
             "User-Agent": "Mozilla/5.0 (compatible; MyResearchBot/1.0)",
             "Referer": "https://www.ncbi.nlm.nih.gov/"
