@@ -27,12 +27,12 @@ def tokenize_fn(example):
     return tokenizer(example["text"], truncation=True, max_length=128)
 
 tokenized = dataset["train"].map(tokenize_fn, batched=True, remove_columns=["text"])
-data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=True, mlm_probability=0.15)
+data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=True, mlm_probability=0.2)
 
 # === Optuna評価関数 ===
 def objective(trial):
-    learning_rate = trial.suggest_float("learning_rate", 1e-5, 1e-4, log=True)
-    weight_decay = trial.suggest_float("weight_decay", 0.01, 0.1)
+    learning_rate = trial.suggest_float("learning_rate", 1e-6, 1e-4, log=True)
+    weight_decay = trial.suggest_float("weight_decay", 0.0001, 0.1)
 
     config = BertConfig(
         vocab_size=tokenizer.vocab_size,
