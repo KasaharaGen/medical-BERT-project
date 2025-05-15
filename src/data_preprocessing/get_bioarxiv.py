@@ -6,13 +6,13 @@ import re
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-BASE_URL = "https://api.biorxiv.org/details/medrxiv/2015-01-01/2025-04-24/{}"
+BASE_URL = "https://api.biorxiv.org/details/biorxiv/2015-01-01/2025-04-24/{}"
 MAX_RESULTS = 10000000
 PAGE_SIZE = 100
 KEYWORDS = ["dengue", "covid19", "malaria", "full", "sars coronavirus", "mars coronavirus"]
 KEYWORDS_NORMALIZED = [kw.lower() for kw in KEYWORDS]
-OUTPUT_PATH = "../data/medrxiv_fulltext.csv"
-METADATA_PATH = "../data/metadata/medrxiv_filtered_metadata.csv"
+OUTPUT_PATH = "../../data/biorxiv_fulltext.csv"
+METADATA_PATH = "../../data/metadata/biorxiv_filtered_metadata.csv"
 
 if not os.path.isdir(os.path.dirname(OUTPUT_PATH)):
     raise FileNotFoundError("[ERROR] ../data ディレクトリが存在しません")
@@ -26,26 +26,32 @@ def contains_keywords(title, abstract):
     norm_text = normalize_text(title) + " " + normalize_text(abstract)
     return any(kw in norm_text for kw in KEYWORDS_NORMALIZED)
 
-def fetch_with_retry(url, max_retries=3, sleep_sec=3):
-    for i in range(max_retries):
+def retry_request(url, headers=None, timeout=10, max_retries=3, sleep_time=5):
+    for attempt in range(1, max_retries + 1):
         try:
-            res = requests.get(url, timeout=10)
+            res = requests.get(url, headers=headers, timeout=timeout)
             res.raise_for_status()
             return res
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            print(f"[WARN] Network issue at attempt {attempt}: {e}")
+            if attempt < max_retries:
+                time.sleep(sleep_time)
+            else:
+                print(f"[ERROR] All network retries failed for URL: {url}")
+                return None
+        except requests.exceptions.HTTPError as e:
+            print(f"[ERROR] HTTP error: {e}")
+            return None
         except requests.exceptions.RequestException as e:
-            print(f"[WARN] Retry {i+1}/{max_retries} failed for {url}: {e}")
-            time.sleep(sleep_sec)
-        except Exception as e:
-            print(f"[ERROR] Non-retryable error for {url}: {e}")
-            break
-    return None
+            print(f"[ERROR] Other request error: {e}")
+            return None
 
 def fetch_jats_xml(jats_url):
-    res = fetch_with_retry(jats_url)
+    res = retry_request(jats_url, timeout=10)
     return res.content if res else None
 
 def fetch_html_text(html_url):
-    res = fetch_with_retry(html_url)
+    res = retry_request(html_url, timeout=10)
     if not res:
         return ""
     soup = BeautifulSoup(res.text, "html.parser")
@@ -100,13 +106,12 @@ def main():
     for cursor in range(0, MAX_RESULTS, PAGE_SIZE):
         url = BASE_URL.format(cursor)
         print(f"[INFO] Fetching: {url}")
-        res = fetch_with_retry(url)
-        if not res:
-            print("[ERROR] API接続失敗、終了します。")
+        response = retry_request(url, timeout=15)
+        if response is None:
             break
 
         try:
-            data = res.json()
+            data = response.json()
         except Exception as e:
             print(f"[ERROR] JSON decode failed: {e}")
             break
@@ -116,11 +121,11 @@ def main():
             print("[INFO] 空のレスポンス。終了します。")
             break
 
-        filtered = [r for r in records if r.get("license", "").lower() == "cc_by" and contains_keywords(r.get("title", ""), r.get("abstract", ""))]
+        filtered = [record for record in records if record.get("license", "").lower() == "cc_by" and contains_keywords(record.get("title", ""), record.get("abstract", ""))]
         all_filtered_metadata.extend(filtered)
 
         with ThreadPoolExecutor(max_workers=50) as executor:
-            futures = [executor.submit(process_record, r) for r in filtered]
+            futures = [executor.submit(process_record, record) for record in filtered]
             for future in as_completed(futures):
                 result = future.result()
                 if result:

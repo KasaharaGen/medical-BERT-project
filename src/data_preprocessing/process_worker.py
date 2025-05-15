@@ -57,9 +57,9 @@ def main():
     input_path = sys.argv[1]
     gpu_id = int(sys.argv[2])
 
-    output_dir = "../data/processed"
+    output_dir = "../../data/processed"
     if not os.path.isdir(output_dir):
-        raise FileNotFoundError("[ERROR] ../data/processed ディレクトリが存在しません")
+        raise FileNotFoundError("[ERROR] ../../data/processed ディレクトリが存在しません")
 
     print(f"[INFO] {input_path} を GPU:{gpu_id} で処理中...")
     df = pd.read_csv(input_path)

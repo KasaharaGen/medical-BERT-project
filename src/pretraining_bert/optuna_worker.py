@@ -13,7 +13,7 @@ gpu_id = sys.argv[1] if len(sys.argv) > 1 else "0"
 os.environ["CUDA_VISIBLE_DEVICES"] = gpu_id
 
 # === 設定 ===
-CORPUS_PATH = "../data/merged_blocks_50%.csv"
+CORPUS_PATH = "../../data/corpus.csv"
 TOKENIZER_PATH = "tokenizer"
 MODEL_OUTPUT_DIR = "output/bert_pretrain_optuna"
 DB_PATH = "sqlite:///optuna.db"
@@ -24,7 +24,7 @@ tokenizer = BertTokenizerFast.from_pretrained(TOKENIZER_PATH)
 dataset = load_dataset("text", data_files={"train": CORPUS_PATH})
 
 def tokenize_fn(example):
-    return tokenizer(example["text"], truncation=True, max_length=128)
+    return tokenizer(example["text"], truncation=True, max_length=512)
 
 tokenized = dataset["train"].map(tokenize_fn, batched=True, remove_columns=["text"])
 data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=True, mlm_probability=0.2)
@@ -49,7 +49,7 @@ def objective(trial):
 
     training_args = TrainingArguments(
         output_dir=f"{MODEL_OUTPUT_DIR}/trial_{trial.number}",
-        per_device_train_batch_size=16,
+        per_device_train_batch_size=512,
         num_train_epochs=1,
         learning_rate=learning_rate,
         weight_decay=weight_decay,

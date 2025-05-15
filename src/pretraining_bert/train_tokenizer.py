@@ -3,7 +3,7 @@ from tokenizers import BertWordPieceTokenizer
 from transformers import BertTokenizerFast
 
 # === 設定 ===
-INPUT_FILE = "../data/merged_blocks_50%.csv"  
+INPUT_FILE = "../data/corpus.csv"  
 OUTPUT_DIR = "tokenizer"
 VOCAB_SIZE = 30000
 

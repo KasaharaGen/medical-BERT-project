@@ -11,7 +11,7 @@ import pandas as pd
 import os
 
 # === 設定 ===
-CORPUS_PATH = "../data/merged_blocks_50%.csv"
+CORPUS_PATH = "../../data/corpus.csv"
 TOKENIZER_PATH = "tokenizer"
 BEST_PARAM_PATH = "output/bert_pretrain_optuna/best_params.json"
 OUTPUT_DIR = "output/pretrained_bert"
@@ -27,7 +27,7 @@ train_dataset_raw = split["train"]
 eval_dataset_raw = split["test"]
 
 def tokenize_fn(example):
-    return tokenizer(example["text"], truncation=True, max_length=128)
+    return tokenizer(example["text"], truncation=True, max_length=512)
 
 train_dataset = train_dataset_raw.map(tokenize_fn, batched=True, remove_columns=["text"])
 eval_dataset = eval_dataset_raw.map(tokenize_fn, batched=True, remove_columns=["text"])
@@ -35,7 +35,7 @@ eval_dataset = eval_dataset_raw.map(tokenize_fn, batched=True, remove_columns=["
 data_collator = DataCollatorForLanguageModeling(
     tokenizer=tokenizer,
     mlm=True,
-    mlm_probability=0.15
+    mlm_probability=0.2
 )
 
 # === ベストハイパーパラメータ読み込み ===
@@ -58,7 +58,7 @@ model = BertForMaskedLM(config=config)
 # === 学習設定 ===
 training_args = TrainingArguments(
     output_dir=OUTPUT_DIR,
-    per_device_train_batch_size=252,
+    per_device_train_batch_size=512,
     num_train_epochs=5,
     learning_rate=best_params["learning_rate"],
     weight_decay=best_params["weight_decay"],

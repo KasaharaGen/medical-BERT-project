@@ -8,12 +8,12 @@ from nltk.tokenize import sent_tokenize
 
 # === 設定 ===
 FILES = [
-    "../data/medrxiv_fulltext.csv",
-    "../data/biorxiv_fulltext.csv",
-    "../data/epmc_fulltext.csv"
+    "../../data/medrxiv_fulltext.csv",
+    "../../data/biorxiv_fulltext.csv",
+    "../../data/epmc_fulltext.csv"
 ]
-OUTPUT_PATH = "../data/merged_fulltext.csv"
-SENTENCE_OUTPUT_PATH = "../data/merged_fulltext_sentences.csv"
+OUTPUT_PATH = "../../data/merged_fulltext.csv"
+SENTENCE_OUTPUT_PATH = "../../data/merged_fulltext_sentences.csv"
 
 # === データ統合 ===
 all_dfs = []
