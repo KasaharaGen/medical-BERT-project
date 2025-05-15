@@ -17,6 +17,8 @@ BEST_PARAM_PATH = "output/bert_pretrain_optuna/best_params.json"
 OUTPUT_DIR = "output/pretrained_bert"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+torch.cuda.empty_cache()
+
 # === トークナイザー ===
 tokenizer = BertTokenizerFast.from_pretrained(TOKENIZER_PATH)
 
@@ -27,7 +29,7 @@ train_dataset_raw = split["train"]
 eval_dataset_raw = split["test"]
 
 def tokenize_fn(example):
-    return tokenizer(example["text"], truncation=True, max_length=512)
+    return tokenizer(example["text"], truncation=True, max_length=128)
 
 train_dataset = train_dataset_raw.map(tokenize_fn, batched=True, remove_columns=["text"])
 eval_dataset = eval_dataset_raw.map(tokenize_fn, batched=True, remove_columns=["text"])
@@ -49,7 +51,7 @@ config = BertConfig(
     num_hidden_layers=12,
     num_attention_heads=12,
     intermediate_size=3072,
-    max_position_embeddings=512,
+    max_position_embeddings=128,
     type_vocab_size=2,
     pad_token_id=tokenizer.pad_token_id
 )
@@ -58,7 +60,7 @@ model = BertForMaskedLM(config=config)
 # === 学習設定 ===
 training_args = TrainingArguments(
     output_dir=OUTPUT_DIR,
-    per_device_train_batch_size=512,
+    per_device_train_batch_size=16,
     num_train_epochs=5,
     learning_rate=best_params["learning_rate"],
     weight_decay=best_params["weight_decay"],

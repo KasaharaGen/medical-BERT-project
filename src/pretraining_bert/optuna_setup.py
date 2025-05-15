@@ -4,5 +4,6 @@ import optuna
 optuna.create_study(
     study_name="bert_pretrain_gpu",
     storage="sqlite:///optuna.db",
-    direction="minimize"
+    direction="minimize",
+    load_if_exists=True
 )
