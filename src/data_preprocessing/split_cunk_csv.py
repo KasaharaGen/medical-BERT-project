@@ -2,8 +2,8 @@ import os
 import pandas as pd
 import math
 
-INPUT_PATH = "../data/merged_fulltext_sentences.csv"
-OUTPUT_DIR = "../data/chunks"
+INPUT_PATH = "../../data/merged_fulltext_sentences.csv"
+OUTPUT_DIR = "../../data/chunks"
 CHUNK_SIZE = 5000  # 1チャンクあたり
 
 def split_csv_by_chunk(input_path, output_dir, chunk_size=5000):

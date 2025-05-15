@@ -8,8 +8,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 BASE_URL = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
 FULLTEXT_URL = "https://www.ebi.ac.uk/europepmc/webservices/rest/{}/{}/fullTextXML"
-OUTPUT_PATH = "../data/epmc_fulltext.csv"
-METADATA_PATH = "../data/metadata/epmc_filtered_metadata.csv"
+OUTPUT_PATH = "../../data/epmc_fulltext.csv"
+METADATA_PATH = "../../data/metadata/epmc_filtered_metadata.csv"
 
 KEYWORDS = [
     "dengue", "covid19", "full", "malaria", "sars coronavirus", "mars coronavirus"

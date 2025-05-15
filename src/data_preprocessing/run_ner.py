@@ -4,14 +4,14 @@ import os
 from time import sleep
 import pandas as pd
 
-chunk_dir = "../data/chunks"
-output_dir = "../data/processed"
+chunk_dir = "../../data/chunks"
+output_dir = "../../data/processed"
 GPU_IDS = [0, 1]
 
 if not os.path.isdir(chunk_dir):
-    raise FileNotFoundError("[ERROR] ../data/chunks ディレクトリが存在しません")
+    raise FileNotFoundError("[ERROR] ../../data/chunks ディレクトリが存在しません")
 if not os.path.isdir(output_dir):
-    raise FileNotFoundError("[ERROR] ../data/processed ディレクトリが存在しません")
+    raise FileNotFoundError("[ERROR] ../../data/processed ディレクトリが存在しません")
 
 chunk_paths = sorted(glob.glob(os.path.join(chunk_dir, "*.csv")))
 processes = []
@@ -43,7 +43,8 @@ for file in block_files:
 
 if all_blocks:
     merged_blocks = pd.concat(all_blocks, ignore_index=True)
-    merged_blocks.to_csv("../data/merged_blocks.csv", index=False)
-    print(f"✅ 統合完了: {len(merged_blocks)} 件を ../data/merged_blocks_50%.csv に保存")
+    corpus_df=merged_blocks["sentence"]
+    corpus_df.to_csv("../../data/corpus.csv", index=False)
+    print(f"✅ 統合完了: {len(merged_blocks)} 件を ../../data/corpus.csv に保存")
 else:
     print("[WARN] 統合対象のブロックファイルが見つかりませんでした")

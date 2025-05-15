@@ -13,7 +13,7 @@ def main():
     required_files = [
         "train_tokenizer.py", "optuna_setup.py",
         "optuna_launcher.py", "optuna_worker.py",
-        "pretrain_medical_bert.py", "data/merged_blocks_50%.csv"
+        "pretrain_medical_bert.py", "../../data/corpus.csv"
     ]
     for f in required_files:
         if not os.path.exists(f):
