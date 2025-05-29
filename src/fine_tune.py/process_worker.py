@@ -44,11 +44,8 @@ def extract_blocks(ner_pipeline, sentence_lists, threshold=0.5):
         has_keyword = contains_term(sentence)
 
         if has_entity or has_keyword:
-            prev = sentence_lists[doc_idx][i - 1] if i > 0 else ""
-            next_ = sentence_lists[doc_idx][i + 1] if i + 1 < len(sentence_lists[doc_idx]) else ""
-            block = " ".join([s for s in [prev, sentence, next_] if s])
             label = 1 if DENGUE_PATTERN.search(sentence) else 0
-            doc_blocks[doc_idx].append((block, label))
+            doc_blocks[doc_idx].append((sentence, label))  
 
     return [list(set(blocks)) for blocks in doc_blocks]
 
@@ -74,7 +71,7 @@ def main():
     model = AutoModelForTokenClassification.from_pretrained(NER_MODEL)
     ner_pipeline_inst = pipeline("ner", model=model, tokenizer=tokenizer, aggregation_strategy="simple", device=gpu_id)
 
-    print("[INFO] NER抽出中（前後文を含む）...")
+    print("[INFO] NER抽出中（単文のみ）...")
     df["candidate_blocks"] = extract_blocks(ner_pipeline_inst, df["sentence_list"].tolist())
 
     flat_blocks = []
@@ -88,7 +85,7 @@ def main():
 
     output_path = os.path.join(output_dir, os.path.basename(input_path).replace(".csv", "_blocks.csv"))
     pd.DataFrame(flat_blocks).to_csv(output_path, index=False)
-    print(f"出力完了: {output_path} に保存（{len(flat_blocks)} ブロック）")
+    print(f"✅ 出力完了: {output_path} に保存（{len(flat_blocks)} 文）")
 
 if __name__ == "__main__":
     main()
