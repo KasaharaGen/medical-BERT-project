@@ -7,8 +7,7 @@ from transformers import pipeline, AutoTokenizer, AutoModelForTokenClassificatio
 NER_MODEL = "d4data/biomedical-ner-all"
 THRESHOLD = 0.5
 
-TERMS = ["dengue", "covid19", "malaria","full", "sars coronavirus", "mars coronavirus"]
-    
+TERMS = ["dengue", "covid19", "malaria", "full", "sars coronavirus", "mars coronavirus"]
 PATTERN = re.compile(r'\b(' + '|'.join(re.escape(term.lower()) for term in TERMS) + r')\b')
 
 def normalize_text(text):
@@ -32,7 +31,8 @@ def extract_blocks(ner_pipeline, sentence_lists, threshold=0.5):
         batch = flat_sentences[i:i+512]
         try:
             ner_results.extend(ner_pipeline(batch))
-        except:
+        except Exception as e:
+            print(f"[WARN] NER batch failed: {e}")
             ner_results.extend([[] for _ in batch])
 
     doc_blocks = [[] for _ in sentence_lists]
@@ -69,22 +69,26 @@ def main():
     print("[INFO] モデル読み込み中...")
     tokenizer = AutoTokenizer.from_pretrained(NER_MODEL)
     model = AutoModelForTokenClassification.from_pretrained(NER_MODEL)
-    ner_pipeline_inst = pipeline("ner", model=model, tokenizer=tokenizer, aggregation_strategy="simple", device=gpu_id)
+    
+    ner_pipeline_inst = pipeline(
+        "ner",
+        model=model,
+        tokenizer=tokenizer,
+        aggregation_strategy="simple",
+        device=gpu_id,
+        batch_size = 8
+    )
 
     print("[INFO] NER抽出中（前後文を含む）...")
     df["candidate_blocks"] = extract_blocks(ner_pipeline_inst, df["sentence_list"].tolist())
 
-    flat_blocks = []
-    for _, row in df.iterrows():
-        base = row.to_dict()
-        for block in row["candidate_blocks"]:
-            record = base.copy()
-            record["candidate_block"] = block
-            flat_blocks.append(record)
+    # ✅ Pandasベースでリファクタリング（リスト列を行に展開）
+    df_expanded = df.explode("candidate_blocks").rename(columns={"candidate_blocks": "candidate_block"})
+    df_expanded = df_expanded[df_expanded["candidate_block"].notnull()]
 
     output_path = os.path.join(output_dir, os.path.basename(input_path).replace(".csv", "_blocks.csv"))
-    pd.DataFrame(flat_blocks).to_csv(output_path, index=False)
-    print(f"出力完了: {output_path} に保存（{len(flat_blocks)} ブロック）")
+    df_expanded.to_csv(output_path, index=False)
+    print(f"✅ 出力完了: {output_path} に保存（{len(df_expanded)} ブロック）")
 
 if __name__ == "__main__":
     main()

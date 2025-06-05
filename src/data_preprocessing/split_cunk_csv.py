@@ -4,9 +4,9 @@ import math
 
 INPUT_PATH = "../../data/merged_fulltext_sentences.csv"
 OUTPUT_DIR = "../../data/chunks"
-CHUNK_SIZE = 5000  # 1チャンクあたり
+CHUNK_SIZE = 4048  # 1チャンクあたり
 
-def split_csv_by_chunk(input_path, output_dir, chunk_size=5000):
+def split_csv_by_chunk(input_path, output_dir, chunk_size):
     if not os.path.isfile(input_path):
         raise FileNotFoundError("[ERROR] 入力ファイルが存在しません: " + input_path)
     if not os.path.isdir(output_dir):

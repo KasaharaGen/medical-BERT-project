@@ -2,10 +2,10 @@ import json
 import torch
 from transformers import (
     BertConfig, BertForMaskedLM, BertTokenizerFast,
-    DataCollatorForLanguageModeling, Trainer, TrainingArguments
+    DataCollatorForLanguageModeling, Trainer, TrainingArguments,
+    EarlyStoppingCallback
 )
-from datasets import load_dataset, DatasetDict
-from sklearn.model_selection import train_test_split
+from datasets import load_dataset
 import matplotlib.pyplot as plt
 import pandas as pd
 import os
@@ -55,19 +55,22 @@ config = BertConfig(
 )
 model = BertForMaskedLM(config=config)
 
-# === 学習設定 ===
+# === 学習設定（EarlyStoppingとベストモデル復元含む） ===
 training_args = TrainingArguments(
     output_dir=OUTPUT_DIR,
-    per_device_train_batch_size=512,
-    num_train_epochs=5,
+    per_device_train_batch_size=128,                     # VRAMに応じて調整
+    num_train_epochs=10,                                 # patienceで早期終了
     learning_rate=best_params["learning_rate"],
     weight_decay=best_params["weight_decay"],
     warmup_steps=500,
     logging_steps=100,
     evaluation_strategy="steps",
     eval_steps=500,
-    save_steps=2000,
+    save_steps=500,
     save_total_limit=2,
+    load_best_model_at_end=True,                         # 👈 ベストモデルを使用
+    metric_for_best_model="eval_loss",
+    greater_is_better=False,
     fp16=torch.cuda.is_available(),
     report_to="tensorboard"
 )
@@ -78,7 +81,8 @@ trainer = Trainer(
     train_dataset=train_dataset,
     eval_dataset=eval_dataset,
     tokenizer=tokenizer,
-    data_collator=data_collator
+    data_collator=data_collator,
+    callbacks=[EarlyStoppingCallback(early_stopping_patience=3)]  # 👈 EarlyStopping有効化
 )
 
 # === 学習実行 ===
@@ -88,7 +92,7 @@ trainer.train()
 trainer.save_model(OUTPUT_DIR)
 tokenizer.save_pretrained(OUTPUT_DIR)
 
-# === ログ保存・学習曲線プロット（train / eval）===
+# === ログ保存・学習曲線プロット ===
 log_history = trainer.state.log_history
 log_df = pd.DataFrame(log_history)
 
@@ -117,6 +121,6 @@ plt.tight_layout()
 plt.savefig(loss_plot)
 plt.show()
 
-print(f"Train loss log: {loss_csv}")
-print(f"Eval loss log:  {eval_csv}")
-print(f"Loss curve plot saved to: {loss_plot}")
+print(f"✅ Train loss log saved to: {loss_csv}")
+print(f"✅ Eval loss log saved to:  {eval_csv}")
+print(f"✅ Loss curve plot saved to: {loss_plot}")
