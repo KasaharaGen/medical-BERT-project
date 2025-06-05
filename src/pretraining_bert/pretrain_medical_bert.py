@@ -58,13 +58,13 @@ model = BertForMaskedLM(config=config)
 # === 学習設定（EarlyStoppingとベストモデル復元含む） ===
 training_args = TrainingArguments(
     output_dir=OUTPUT_DIR,
-    per_device_train_batch_size=128,                     # VRAMに応じて調整
+    per_device_train_batch_size=8,                     # VRAMに応じて調整
     num_train_epochs=10,                                 # patienceで早期終了
     learning_rate=best_params["learning_rate"],
     weight_decay=best_params["weight_decay"],
     warmup_steps=500,
     logging_steps=100,
-    evaluation_strategy="steps",
+    eval_strategy="steps",
     eval_steps=500,
     save_steps=500,
     save_total_limit=2,
