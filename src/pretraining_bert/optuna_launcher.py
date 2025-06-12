@@ -1,7 +1,7 @@
 import subprocess
 
 # 使用GPUのID一覧（GTX1080Ti ×2 なら [0, 1]）
-gpu_ids = [0, 1]
+gpu_ids = [0, 1 ,2 ,3 ,4]
 
 # 各GPUごとにworker起動
 processes = []

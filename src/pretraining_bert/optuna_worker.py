@@ -59,13 +59,13 @@ def objective(trial):
 
     training_args = TrainingArguments(
         output_dir=f"{MODEL_OUTPUT_DIR}/trial_{trial.number}",
-        per_device_train_batch_size=8,          # VRAMに応じて調整
+        per_device_train_batch_size=64,          # VRAMに応じて調整
         num_train_epochs=10,                      # EarlyStoppingを前提に多めに
         learning_rate=learning_rate,
         weight_decay=weight_decay,
         warmup_steps=500,
         logging_steps=100,
-        evaluation_strategy="steps",
+        eval_strategy="steps",
         eval_steps=500,
         save_steps=500,
         save_total_limit=1,

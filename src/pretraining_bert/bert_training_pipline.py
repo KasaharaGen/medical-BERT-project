@@ -23,7 +23,7 @@ def main():
     run_step("Tokenizer Training", "python train_tokenizer.py")
     run_step("Optuna Study Initialization", "python optuna_setup.py")
     run_step("Parallel Hparam Search (GPU)", "python optuna_launcher.py")
-    run_step("Final Pretraining with Best Params", "python pretrain_medical_bert.py")
+    #run_step("Final Pretraining with Best Params", "python pretrain_medical_bert.py")
     
     print("\n🎉 All pipeline steps completed successfully!")
 
