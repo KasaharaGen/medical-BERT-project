@@ -50,8 +50,8 @@ def main(rank, world_size):
 
         train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset, num_replicas=world_size, rank=rank)
         eval_sampler = torch.utils.data.distributed.DistributedSampler(eval_dataset, num_replicas=world_size, rank=rank)
-        train_loader = DataLoader(train_dataset, batch_size=64, sampler=train_sampler, collate_fn=collator)
-        eval_loader = DataLoader(eval_dataset, batch_size=64, sampler=eval_sampler, collate_fn=collator)
+        train_loader = DataLoader(train_dataset, batch_size=32, sampler=train_sampler, collate_fn=collator)
+        eval_loader = DataLoader(eval_dataset, batch_size=32, sampler=eval_sampler, collate_fn=collator)
 
         config = BertConfig(
             vocab_size=tokenizer.vocab_size,
