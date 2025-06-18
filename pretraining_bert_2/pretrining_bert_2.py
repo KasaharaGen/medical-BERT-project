@@ -43,8 +43,8 @@ eval_dataset = TextDataset(eval_texts, tokenizer)
 
 # === Collator・DataLoader定義 ===
 data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=True, mlm_probability=0.2)
-train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True, collate_fn=data_collator)
-eval_loader = DataLoader(eval_dataset, batch_size=128, shuffle=False, collate_fn=data_collator)
+train_loader = DataLoader(train_dataset, batch_size=256, shuffle=True, collate_fn=data_collator)
+eval_loader = DataLoader(eval_dataset, batch_size=256, shuffle=False, collate_fn=data_collator)
 
 # === オプティマイザ（weight_decayあり） ===
 no_decay = ["bias", "LayerNorm.weight"]

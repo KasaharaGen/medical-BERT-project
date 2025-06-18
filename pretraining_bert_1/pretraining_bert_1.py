@@ -54,8 +54,8 @@ class TextDataset(Dataset):
 train_dataset = TextDataset(train_texts, tokenizer)
 eval_dataset = TextDataset(eval_texts, tokenizer)
 collator = DataCollatorForLanguageModeling(tokenizer, mlm=True, mlm_probability=0.2)
-train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True, collate_fn=collator)
-eval_loader = DataLoader(eval_dataset, batch_size=128, shuffle=False, collate_fn=collator)
+train_loader = DataLoader(train_dataset, batch_size=256, shuffle=True, collate_fn=collator)
+eval_loader = DataLoader(eval_dataset, batch_size=256, shuffle=False, collate_fn=collator)
 
 # === Optimizer ===
 optimizer = AdamW(model.parameters(), lr=5e-5)
