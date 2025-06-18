@@ -4,10 +4,11 @@ from transformers import PreTrainedTokenizerFast, BertForMaskedLM, DataCollatorF
 from torch.utils.data import Dataset, DataLoader
 from torch.optim import AdamW
 import matplotlib.pyplot as plt
+from tqdm import tqdm
 
 # === モデル・トークナイザーの読み込み ===
-model = BertForMaskedLM.from_pretrained("../pretraining_bert_1/pretrain_bert_1_model")
-tokenizer = PreTrainedTokenizerFast.from_pretrained("../pretraining_bert_1/pretrain_bert_1_tokenizer")
+model = BertForMaskedLM.from_pretrained("../pretraining_bert_1/pretrain_phase1_model")
+tokenizer = PreTrainedTokenizerFast.from_pretrained("../pretraining_bert_1/pretrain_phase1_tokenizer")
 
 # === GPU設定 ===
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -20,7 +21,7 @@ df = pd.read_csv("dengue_abstracts.csv")
 dengue_texts = df["abstract"].dropna().astype(str).tolist()
 
 # 訓練/検証データに分割
-train_ratio = 0.9
+train_ratio = 0.98
 train_size = int(len(dengue_texts) * train_ratio)
 train_texts = dengue_texts[:train_size]
 eval_texts = dengue_texts[train_size:]
@@ -45,7 +46,7 @@ data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=True, m
 train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True, collate_fn=data_collator)
 eval_loader = DataLoader(eval_dataset, batch_size=128, shuffle=False, collate_fn=data_collator)
 
-# === オプティマイザ（weight_decayあり）===
+# === オプティマイザ（weight_decayあり） ===
 no_decay = ["bias", "LayerNorm.weight"]
 optimizer_grouped_parameters = [
     {
@@ -66,9 +67,9 @@ eval_losses_phase2 = []
 for epoch in range(num_epochs):
     model.train()
     total_loss = 0.0
-    for batch in train_loader:
-        for k, v in batch.items():
-            batch[k] = v.to(device)
+    loop = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs} [Training]", leave=False)
+    for batch in loop:
+        batch = {k: torch.tensor(v).to(device) for k, v in batch.items()}
         outputs = model(**batch)
         loss = outputs.loss
         if torch.cuda.device_count() > 1:
@@ -77,19 +78,21 @@ for epoch in range(num_epochs):
         loss.backward()
         optimizer.step()
         total_loss += loss.item()
+        loop.set_postfix(loss=loss.item())
     avg_train_loss = total_loss / len(train_loader)
 
     model.eval()
     total_eval_loss = 0.0
+    eval_loop = tqdm(eval_loader, desc=f"Epoch {epoch+1}/{num_epochs} [Eval]", leave=False)
     with torch.no_grad():
-        for batch in eval_loader:
-            for k, v in batch.items():
-                batch[k] = v.to(device)
+        for batch in eval_loop:
+            batch = {k: torch.tensor(v).to(device) for k, v in batch.items()}
             outputs = model(**batch)
             loss = outputs.loss
             if torch.cuda.device_count() > 1:
                 loss = loss.mean()
             total_eval_loss += loss.item()
+            eval_loop.set_postfix(eval_loss=loss.item())
     avg_eval_loss = total_eval_loss / len(eval_loader)
 
     train_losses_phase2.append(avg_train_loss)
