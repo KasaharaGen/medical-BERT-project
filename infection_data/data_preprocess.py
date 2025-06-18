@@ -18,12 +18,11 @@ for idx, row in df.iterrows():
     sentences = sent_tokenize(abstract)
     for sent in sentences:
         split_rows.append({
-            'original_index': idx,
-            'sentence': sent.strip()
+            'sentence': sent.strip().lower()
         })
 
 # 分割結果をデータフレームに変換
 df_split = pd.DataFrame(split_rows)
 
 # CSVとして出力
-df_split.to_csv("abstract_sentences.csv", index=False)
+df_split.to_csv("infectious_sentences.csv", index=False)

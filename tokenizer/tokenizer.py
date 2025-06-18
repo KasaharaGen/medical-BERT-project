@@ -6,7 +6,7 @@ from tokenizers.processors import BertProcessing
 import os
 
 # === CSVからsentenceを読み込む ===
-csv_path = "../infection_data/abstract_sentences.csv"  # CSVファイルパス
+csv_path = "../data/corpus.csv"  # CSVファイルパス
 df = pd.read_csv(csv_path)
 sentence = df["sentence"].dropna().astype(str).tolist()
 
@@ -32,7 +32,7 @@ tokenizer.pre_tokenizer = Whitespace()
 
 # 特殊トークンの定義
 special_tokens = ["[UNK]", "[CLS]", "[SEP]", "[PAD]", "[MASK]"]
-trainer = trainers.BpeTrainer(vocab_size=30000, special_tokens=special_tokens)
+trainer = trainers.BpeTrainer(vocab_size=50000, special_tokens=special_tokens)
 
 # 学習実行（ファイルはリストで指定）
 tokenizer.train([tmp_file], trainer)
