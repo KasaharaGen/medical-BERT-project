@@ -5,15 +5,15 @@ from tokenizers.pre_tokenizers import Whitespace
 from tokenizers.processors import BertProcessing
 import os
 
-# === CSVからアブストラクトを読み込む ===
-csv_path = "../infection_data/abstract_sentence.csv"  # CSVファイルパス
+# === CSVからsentenceを読み込む ===
+csv_path = "../infection_data/abstract_sentences.csv"  # CSVファイルパス
 df = pd.read_csv(csv_path)
-abstracts = df["abstract"].dropna().astype(str).tolist()
+sentence = df["sentence"].dropna().astype(str).tolist()
 
 # === 一時ファイルにテキストを書き出す ===
 tmp_file = "abstracts_for_tokenizer.txt"
 with open(tmp_file, "w", encoding="utf-8") as f:
-    for abs_text in abstracts:
+    for abs_text in sentence:
         abs_text = abs_text.strip().replace("\n", " ")
         f.write(abs_text + "\n")
 

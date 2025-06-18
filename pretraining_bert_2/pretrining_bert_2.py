@@ -112,5 +112,5 @@ plt.show()
 
 # === モデルとトークナイザーの保存 ===
 model_to_save = model.module if hasattr(model, "module") else model
-model_to_save.save_pretrained("pretrain_bert_1_model")
-tokenizer.save_pretrained("pretrain_bert_1_tokenizer")
+model_to_save.save_pretrained("pretrain_bert_2_model")
+tokenizer.save_pretrained("pretrain_bert_2_tokenizer")

@@ -2,17 +2,19 @@ import pandas as pd
 import nltk
 from nltk.tokenize import sent_tokenize
 
+
 # 初回のみ必要
 nltk.download('punkt')
+nltk.download('punkt_tab')
 
 # CSVファイルの読み込み（ファイルパスを適宜修正）
-df = pd.read_csv("infectious_desease_merged.csv")
+df = pd.read_csv("infectious_disease_merged.csv")
 
 # 文単位に分割し、新しい行として展開
 split_rows = []
 
 for idx, row in df.iterrows():
-    abstract = str(row['abstract'])  # NaN対策で文字列変換
+    abstract = str(row['Abstract'])  # NaN対策で文字列変換
     sentences = sent_tokenize(abstract)
     for sent in sentences:
         split_rows.append({
