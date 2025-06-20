@@ -27,12 +27,12 @@ def ddp_main(rank, world_size):
         torch.cuda.set_device(rank)
 
         # データの読み込み
-        df = pd.read_csv("dengue_abstracts.csv")
-        texts = df["abstract"].dropna().astype(str).tolist()
+        df = pd.read_csv('../dengue_data/dengue_sentences.csv')
+        texts = df["sentence"].dropna().astype(str).tolist()
         split_idx = int(len(texts) * 0.98)
         train_texts, eval_texts = texts[:split_idx], texts[split_idx:]
 
-        tokenizer = PreTrainedTokenizerFast.from_pretrained("../pretraining_bert_1/pretrain_phase1_tokenizer")
+        tokenizer = PreTrainedTokenizerFast.from_pretrained("../pretraining_bert_1/pretrain_phase1_tokenizer_ddp")
 
         train_dataset = TextDataset(train_texts, tokenizer)
         eval_dataset = TextDataset(eval_texts, tokenizer)
@@ -44,7 +44,7 @@ def ddp_main(rank, world_size):
         train_loader = DataLoader(train_dataset, batch_size=32, sampler=train_sampler, collate_fn=collator)
         eval_loader = DataLoader(eval_dataset, batch_size=32, sampler=eval_sampler, collate_fn=collator)
 
-        model = BertForMaskedLM.from_pretrained("../pretraining_bert_1/pretrain_phase1_model").to(rank)
+        model = BertForMaskedLM.from_pretrained("../pretraining_bert_1/pretrain_phase1_model_ddp").to(rank)
         model = DDP(model, device_ids=[rank])
 
         # Optimizer設定
@@ -62,7 +62,7 @@ def ddp_main(rank, world_size):
         optimizer = AdamW(optimizer_grouped_parameters, lr=5e-5)
 
         # 学習ループ
-        num_epochs = 2
+        num_epochs = 5
         train_losses, eval_losses = [], []
 
         for epoch in range(num_epochs):
@@ -70,7 +70,7 @@ def ddp_main(rank, world_size):
             train_sampler.set_epoch(epoch)
             total_train_loss = 0.0
             for batch in tqdm(train_loader, desc=f"[Rank {rank}] Epoch {epoch+1} Train", leave=False):
-                batch = {k: torch.tensor(v).to(rank) for k, v in batch.items()}
+                batch = {k: v.clone().detach().to(rank) for k, v in batch.items()}
                 outputs = model(**batch)
                 loss = outputs.loss
                 optimizer.zero_grad()
@@ -86,7 +86,7 @@ def ddp_main(rank, world_size):
                 total_eval_loss = 0.0
                 with torch.no_grad():
                     for batch in tqdm(eval_loader, desc=f"[Rank {rank}] Eval", leave=False):
-                        batch = {k: torch.tensor(v).to(rank) for k, v in batch.items()}
+                        batch = {k: v.clone().detach().to(rank) for k, v in batch.items()}
                         outputs = model(**batch)
                         total_eval_loss += outputs.loss.item()
                 avg_eval_loss = total_eval_loss / len(eval_loader)
