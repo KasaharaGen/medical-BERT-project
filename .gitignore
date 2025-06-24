@@ -1,2 +1,5 @@
 *.csv
 output
+*.json
+pretraining_bert_1/pretrain_phase1_model_ddp
+pretraining_bert_1/pretrain_phase1_tokenizer_ddp

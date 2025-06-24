@@ -62,7 +62,7 @@ def main(rank, world_size):
         model = DDP(model, device_ids=[rank])
         optimizer = torch.optim.AdamW(model.parameters(), lr=5e-5)
 
-        num_epochs = 3
+        num_epochs = 6
         train_losses = []
         eval_losses = []
 
