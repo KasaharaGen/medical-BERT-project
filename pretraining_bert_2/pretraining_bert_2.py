@@ -26,7 +26,6 @@ def ddp_main(rank, world_size):
         dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
         torch.cuda.set_device(rank)
 
-        # データの読み込み
         df = pd.read_csv('../dengue_data/dengue_sentences.csv')
         texts = df["sentence"].dropna().astype(str).tolist()
         split_idx = int(len(texts) * 0.98)
@@ -47,28 +46,31 @@ def ddp_main(rank, world_size):
         model = BertForMaskedLM.from_pretrained("../pretraining_bert_1/pretrain_phase1_model_ddp").to(rank)
         model = DDP(model, device_ids=[rank])
 
-        # Optimizer設定
         no_decay = ["bias", "LayerNorm.weight"]
         optimizer_grouped_parameters = [
-            {
-                "params": [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)],
-                "weight_decay": 0.01,
-            },
-            {
-                "params": [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)],
-                "weight_decay": 0.0,
-            },
+            {"params": [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)],
+             "weight_decay": 0.01},
+            {"params": [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)],
+             "weight_decay": 0.0}
         ]
         optimizer = AdamW(optimizer_grouped_parameters, lr=5e-5)
 
-        # 学習ループ
-        num_epochs = 5
+        num_epochs = 20
+        patience = 2
+        best_eval_loss = float("inf")
+        epochs_no_improve = 0
+        early_stop_triggered = False
+
         train_losses, eval_losses = [], []
 
         for epoch in range(num_epochs):
+            if early_stop_triggered:
+                break
+
             model.train()
             train_sampler.set_epoch(epoch)
             total_train_loss = 0.0
+
             for batch in tqdm(train_loader, desc=f"[Rank {rank}] Epoch {epoch+1} Train", leave=False):
                 batch = {k: v.clone().detach().to(rank) for k, v in batch.items()}
                 outputs = model(**batch)
@@ -80,7 +82,6 @@ def ddp_main(rank, world_size):
 
             avg_train_loss = total_train_loss / len(train_loader)
 
-            # 評価（rank 0 のみ）
             if rank == 0:
                 model.eval()
                 total_eval_loss = 0.0
@@ -89,27 +90,38 @@ def ddp_main(rank, world_size):
                         batch = {k: v.clone().detach().to(rank) for k, v in batch.items()}
                         outputs = model(**batch)
                         total_eval_loss += outputs.loss.item()
+
                 avg_eval_loss = total_eval_loss / len(eval_loader)
                 train_losses.append(avg_train_loss)
                 eval_losses.append(avg_eval_loss)
                 print(f"[Phase2] Epoch {epoch+1} - Train Loss: {avg_train_loss:.4f}, Eval Loss: {avg_eval_loss:.4f}")
+
+                # === Early Stopping ===
+                if avg_eval_loss < best_eval_loss:
+                    best_eval_loss = avg_eval_loss
+                    epochs_no_improve = 0
+                else:
+                    epochs_no_improve += 1
+                    if epochs_no_improve >= patience:
+                        print(f"[Phase2] Early stopping triggered at epoch {epoch+1}")
+                        early_stop_triggered = True
 
         if rank == 0:
             model.module.save_pretrained("pretrain_phase2_model_ddp")
             tokenizer.save_pretrained("pretrain_phase2_tokenizer_ddp")
 
             pd.DataFrame({
-                "epoch": list(range(1, num_epochs + 1)),
+                "epoch": list(range(1, len(train_losses) + 1)),
                 "train_loss": train_losses,
                 "eval_loss": eval_losses
             }).to_csv("loss_log_phase2_ddp.csv", index=False)
 
             plt.figure(figsize=(8, 5))
-            plt.plot(range(1, num_epochs + 1), train_losses, label='Train Loss')
-            plt.plot(range(1, num_epochs + 1), eval_losses, label='Eval Loss')
+            plt.plot(range(1, len(train_losses) + 1), train_losses, label='Train Loss')
+            plt.plot(range(1, len(eval_losses) + 1), eval_losses, label='Eval Loss')
             plt.xlabel("Epoch")
             plt.ylabel("Loss")
-            plt.title("Phase2 DDP Training Loss")
+            plt.title("Phase2 DDP Training Loss with Early Stopping")
             plt.legend()
             plt.grid(True)
             plt.tight_layout()
