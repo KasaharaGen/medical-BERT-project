@@ -3,3 +3,5 @@ output
 *.json
 pretraining_bert_1/pretrain_phase1_model_ddp
 pretraining_bert_1/pretrain_phase1_tokenizer_ddp
+pretraining_bert_2/pretrain_phase2_model_ddp
+pretraining_bert_2/pretrain_phase2_tokenizer_ddp
