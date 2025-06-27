@@ -62,7 +62,10 @@ def main(rank, world_size):
         model = DDP(model, device_ids=[rank])
         optimizer = torch.optim.AdamW(model.parameters(), lr=5e-5)
 
-        num_epochs = 6
+        num_epochs = 10
+        patience = 3
+        best_eval_loss = float('inf')
+        patience_counter = 0
         train_losses = []
         eval_losses = []
 
@@ -97,13 +100,21 @@ def main(rank, world_size):
                 eval_losses.append(avg_eval_loss)
                 print(f"Epoch {epoch+1} - Train Loss: {avg_train_loss:.4f}, Eval Loss: {avg_eval_loss:.4f}")
 
-        if rank == 0:
-            model.module.save_pretrained("pretrain_phase1_model_ddp")
-            tokenizer.save_pretrained("pretrain_phase1_tokenizer_ddp")
+                if avg_eval_loss < best_eval_loss:
+                    best_eval_loss = avg_eval_loss
+                    patience_counter = 0
+                    model.module.save_pretrained("pretrain_phase1_model_ddp")
+                    tokenizer.save_pretrained("pretrain_phase1_tokenizer_ddp")
+                else:
+                    patience_counter += 1
+                    if patience_counter >= patience:
+                        print("Early stopping triggered")
+                        break
 
+        if rank == 0:
             plt.figure(figsize=(8, 5))
-            plt.plot(range(1, num_epochs + 1), train_losses, label="Train Loss")
-            plt.plot(range(1, num_epochs + 1), eval_losses, label="Eval Loss")
+            plt.plot(range(1, len(train_losses) + 1), train_losses, label="Train Loss")
+            plt.plot(range(1, len(eval_losses) + 1), eval_losses, label="Eval Loss")
             plt.xlabel("Epoch")
             plt.ylabel("Loss")
             plt.title("Pretraining Loss Curve")
@@ -114,7 +125,7 @@ def main(rank, world_size):
             plt.show()
 
             pd.DataFrame({
-                "epoch": list(range(1, num_epochs + 1)),
+                "epoch": list(range(1, len(train_losses) + 1)),
                 "train_loss": train_losses,
                 "eval_loss": eval_losses
             }).to_csv("loss_log.csv", index=False)
