@@ -49,14 +49,14 @@ def ddp_main(rank, world_size):
         no_decay = ["bias", "LayerNorm.weight"]
         optimizer_grouped_parameters = [
             {"params": [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)],
-             "weight_decay": 0.01},
+             "weight_decay": 0.0001},
             {"params": [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)],
              "weight_decay": 0.0}
         ]
         optimizer = AdamW(optimizer_grouped_parameters, lr=5e-5)
 
         num_epochs = 20
-        patience = 2
+        patience = 5
         best_eval_loss = float("inf")
         epochs_no_improve = 0
         early_stop_triggered = False
