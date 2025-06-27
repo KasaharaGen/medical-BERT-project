@@ -26,7 +26,7 @@ def clean_text(text):
 sentences = df["sentence"].dropna().astype(str).map(clean_text).tolist()
 
 # === 医学語選定（TF-IDF） ===
-vectorizer = TfidfVectorizer(max_features=10000, stop_words="english", ngram_range=(1,2))
+vectorizer = TfidfVectorizer(max_features=1000, stop_words="english", ngram_range=(1,2))
 X = vectorizer.fit_transform(sentences)
 top_vocab = vectorizer.get_feature_names_out()
 
