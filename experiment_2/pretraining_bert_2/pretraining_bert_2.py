@@ -26,7 +26,7 @@ def ddp_main(rank, world_size):
         dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
         torch.cuda.set_device(rank)
 
-        df = pd.read_csv('../dengue_data/dengue_sentences.csv')
+        df = pd.read_csv('../data/dengue_data/dengue_sentences.csv')
         texts = df["sentence"].dropna().astype(str).tolist()
         split_idx = int(len(texts) * 0.98)
         train_texts, eval_texts = texts[:split_idx], texts[split_idx:]
@@ -56,7 +56,7 @@ def ddp_main(rank, world_size):
         optimizer = AdamW(optimizer_grouped_parameters, lr=5e-5)
 
         num_epochs = 20
-        patience = 5
+        patience = 3
         best_eval_loss = float("inf")
         epochs_no_improve = 0
         early_stop_triggered = False

@@ -1,8 +1,8 @@
 import pandas as pd
 
 # CSVファイルの読み込み
-df1 = pd.read_csv("../infection_data/infectious_sentences.csv")
-df2 = pd.read_csv("../dengue_data/dengue_sentences.csv")
+df1 = pd.read_csv("infection_data/infectious_sentences.csv")
+df2 = pd.read_csv("dengue_data/dengue_sentences.csv")
 
 # 縦方向に結合（行を追加）
 df_combined = pd.concat([df1, df2], ignore_index=True)

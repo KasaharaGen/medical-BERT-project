@@ -32,7 +32,7 @@ def main(rank, world_size):
         torch.cuda.set_device(rank)
 
         # データ準備
-        df = pd.read_csv("../infection_data/abstract_sentences.csv")
+        df = pd.read_csv("../data/infection_data/infection_sentences.csv")
         sentences = df["sentence"].dropna().astype(str).tolist()
         train_size = int(len(sentences) * 0.98)
         train_texts = sentences[:train_size]
