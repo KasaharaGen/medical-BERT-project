@@ -122,7 +122,6 @@ def main(rank, world_size):
             plt.grid(True)
             plt.tight_layout()
             plt.savefig("pretrain_loss_curve.png")
-            plt.show()
 
             pd.DataFrame({
                 "epoch": list(range(1, len(train_losses) + 1)),

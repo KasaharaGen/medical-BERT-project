@@ -126,7 +126,7 @@ def ddp_main(rank, world_size):
             plt.grid(True)
             plt.tight_layout()
             plt.savefig("pretrain_phase2_ddp_loss_curve.png")
-            plt.show()
+            
 
         dist.destroy_process_group()
 
