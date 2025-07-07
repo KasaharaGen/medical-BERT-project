@@ -6,39 +6,48 @@ import sys
 scripts = [
     "data/dengue_data/data_preprocess.py",
     "data/infection_data/data_preprocess.py",
+    "data/merged.py",
     "tokenizer/tokenizer.py"
 ]
 
+# === ファイル存在チェック ===
 missing_files = [script for script in scripts if not os.path.exists(script)]
 if missing_files:
     print("以下のスクリプトが見つかりません:")
     for file in missing_files:
         print(f" - {file}")
     print("全てのファイルが揃っていないため処理を終了します")
-    sys.exit(1)  
+    sys.exit(1)
 
-print("すべてのスクリプトが存在します。順番に実行を開始します\n")
+print("✅ すべてのスクリプトが存在します。順番に実行を開始します\n")
 
-
-# エラー記録用リスト
+# === エラー記録用リスト ===
 errors = []
 
 for script in scripts:
     print(f"\n=== {script} を実行中 ===")
     try:
-        result = subprocess.run(["python", script], check=True, capture_output=True, text=True)
-        print(f"{script} 正常終了")
-    except subprocess.CalledProcessError as e:
-        print(f"⚠️ エラー: {script} の実行に失敗しました")
-        print(f"終了コード: {e.returncode}")
-        print(f"標準出力:\n{e.stdout}")
-        print(f"標準エラー出力:\n{e.stderr}")
-        errors.append({
-            "script": script,
-            "returncode": e.returncode,
-            "stdout": e.stdout,
-            "stderr": e.stderr
-        })
+        # 標準出力は即座にターミナルへ流す
+        process = subprocess.Popen(
+            ["python", script],
+            stdout=sys.stdout,
+            stderr=subprocess.PIPE,  # 標準エラーだけキャプチャ
+            text=True
+        )
+        _, stderr = process.communicate()
+
+        if process.returncode == 0:
+            print(f"{script} 正常終了")
+        else:
+            print(f"⚠️ エラー: {script} の実行に失敗しました (終了コード: {process.returncode})")
+            print(f"標準エラー出力:\n{stderr}")
+            errors.append({
+                "script": script,
+                "returncode": process.returncode,
+                "stdout": "(標準出力はターミナルに直接表示)",
+                "stderr": stderr
+            })
+
     except FileNotFoundError as e:
         print(f"⚠️ エラー: {script} が見つかりません")
         errors.append({
@@ -48,9 +57,7 @@ for script in scripts:
             "stderr": str(e)
         })
 
-# ============================
-# 実行後にエラー一覧をまとめて表示
-# ============================
+# === 実行後にエラー一覧表示 ===
 if errors:
     print("\n===== ⚠️ エラーが発生したスクリプト一覧 =====")
     for err in errors:
