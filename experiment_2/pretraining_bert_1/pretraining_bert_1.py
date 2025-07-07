@@ -32,14 +32,14 @@ def main(rank, world_size):
         torch.cuda.set_device(rank)
 
         # データ準備
-        df = pd.read_csv("../data/infection_data/infection_sentences.csv")
+        df = pd.read_csv("data/infection_data/infection_sentences.csv")
         sentences = df["sentence"].dropna().astype(str).tolist()
         train_size = int(len(sentences) * 0.98)
         train_texts = sentences[:train_size]
         eval_texts = sentences[train_size:]
 
         tokenizer = PreTrainedTokenizerFast(
-            tokenizer_file="../tokenizer/tokenizer.json",
+            tokenizer_file="tokenizer/tokenizer.json",
             unk_token="[UNK]", pad_token="[PAD]",
             cls_token="[CLS]", sep_token="[SEP]", mask_token="[MASK]"
         )
@@ -103,8 +103,8 @@ def main(rank, world_size):
                 if avg_eval_loss < best_eval_loss:
                     best_eval_loss = avg_eval_loss
                     patience_counter = 0
-                    model.module.save_pretrained("pretrain_phase1_model_ddp")
-                    tokenizer.save_pretrained("pretrain_phase1_tokenizer_ddp")
+                    model.module.save_pretrained("pretrain_bert_1/pretrain_phase1_model_ddp")
+                    tokenizer.save_pretrained("pretrain_bert_1/pretrain_phase1_tokenizer_ddp")
                 else:
                     patience_counter += 1
                     if patience_counter >= patience:
@@ -121,13 +121,13 @@ def main(rank, world_size):
             plt.legend()
             plt.grid(True)
             plt.tight_layout()
-            plt.savefig("pretrain_loss_curve.png")
+            plt.savefig("pretrain_bert_1/pretrain_loss_curve.png")
 
             pd.DataFrame({
                 "epoch": list(range(1, len(train_losses) + 1)),
                 "train_loss": train_losses,
                 "eval_loss": eval_losses
-            }).to_csv("loss_log.csv", index=False)
+            }).to_csv("pretrain_bert_1/loss_log.csv", index=False)
 
         dist.destroy_process_group()
 

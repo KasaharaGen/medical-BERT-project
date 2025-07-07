@@ -8,8 +8,8 @@ from tokenizers.processors import BertProcessing
 import os
 
 # === パラメータ ===
-csv_path = "../data/corpus.csv"
-mesh_path = "../mesh/mesh_dengue_infection_terms.txt"  # MeSH語リスト（1行1語）
+csv_path = "data/corpus.csv"
+mesh_path = "tokenizer/mesh/mesh_dengue_infection_terms.txt"  # MeSH語リスト（1行1語）
 vocab_size = 20000
 priority_vocab_size = 10000  # TF-IDF上位語を優先
 
@@ -41,7 +41,7 @@ medical_terms = [word for word in tfidf_top_words if word in mesh_terms]
 priority_vocab = list(dict.fromkeys(medical_terms + list(tfidf_top_words)))  # 重複排除し順序維持
 
 # === トークナイザー学習用テキスト生成 ===
-tmp_file = "abstracts_for_tokenizer.txt"
+tmp_file = "tokenizer/abstracts_for_tokenizer.txt"
 with open(tmp_file, "w", encoding="utf-8") as f:
     for sent in sentences:
         f.write(sent + "\n")
@@ -78,6 +78,6 @@ tokenizer.post_processor = BertProcessing(
 )
 
 # 保存
-tokenizer.save("tokenizer.json")
+tokenizer.save("tokenizer/tokenizer.json")
 print("✅ Tokenizer trained and saved to tokenizer.json")
 os.remove(tmp_file)
