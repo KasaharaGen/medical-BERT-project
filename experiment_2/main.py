@@ -4,7 +4,7 @@ import sys
 
 # 実行したいPythonスクリプトのリスト
 scripts = [
-    "data_run.py",
+    #"data_run.py",
     "pretraining.py"
 ]
 

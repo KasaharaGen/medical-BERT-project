@@ -107,14 +107,14 @@ def ddp_main(rank, world_size):
                         early_stop_triggered = True
 
         if rank == 0:
-            model.module.save_pretrained("pretrain_bert_2/pretrain_phase2_model_ddp")
-            tokenizer.save_pretrained("pretrain_bert_2/pretrain_phase2_tokenizer_ddp")
+            model.module.save_pretrained("pretraining_bert_2/pretrain_phase2_model_ddp")
+            tokenizer.save_pretrained("pretraining_bert_2/pretrain_phase2_tokenizer_ddp")
 
             pd.DataFrame({
                 "epoch": list(range(1, len(train_losses) + 1)),
                 "train_loss": train_losses,
                 "eval_loss": eval_losses
-            }).to_csv("pretrain_bert_2/loss_log_phase2_ddp.csv", index=False)
+            }).to_csv("pretraining_bert_2/loss_log_phase2_ddp.csv", index=False)
 
             plt.figure(figsize=(8, 5))
             plt.plot(range(1, len(train_losses) + 1), train_losses, label='Train Loss')
@@ -125,7 +125,7 @@ def ddp_main(rank, world_size):
             plt.legend()
             plt.grid(True)
             plt.tight_layout()
-            plt.savefig("pretrain_bert_2/pretrain_phase2_ddp_loss_curve.png")
+            plt.savefig("pretraining_bert_2/pretrain_phase2_ddp_loss_curve.png")
             
 
         dist.destroy_process_group()

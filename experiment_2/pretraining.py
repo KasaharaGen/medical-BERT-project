@@ -4,7 +4,7 @@ import sys
 
 # 実行したいPythonスクリプトのリスト
 scripts = [
-    "pretraining_bert_1/pretraining_bert_1.py",
+    #"pretraining_bert_1/pretraining_bert_1.py",
     "pretraining_bert_2/pretraining_bert_2.py"
 ]
 
