@@ -26,12 +26,12 @@ def ddp_main(rank, world_size):
         dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
         torch.cuda.set_device(rank)
 
-        df = pd.read_csv('../dengue_data/dengue_sentences.csv')
+        df = pd.read_csv('data/dengue_data/dengue_sentences.csv')
         texts = df["sentence"].dropna().astype(str).tolist()
         split_idx = int(len(texts) * 0.98)
         train_texts, eval_texts = texts[:split_idx], texts[split_idx:]
 
-        tokenizer = PreTrainedTokenizerFast.from_pretrained("../pretraining_bert_1/pretrain_phase1_tokenizer_ddp")
+        tokenizer = PreTrainedTokenizerFast.from_pretrained("pretraining_bert_1/pretrain_phase1_tokenizer_ddp")
 
         train_dataset = TextDataset(train_texts, tokenizer)
         eval_dataset = TextDataset(eval_texts, tokenizer)
@@ -43,7 +43,7 @@ def ddp_main(rank, world_size):
         train_loader = DataLoader(train_dataset, batch_size=32, sampler=train_sampler, collate_fn=collator)
         eval_loader = DataLoader(eval_dataset, batch_size=32, sampler=eval_sampler, collate_fn=collator)
 
-        model = BertForMaskedLM.from_pretrained("../pretraining_bert_1/pretrain_phase1_model_ddp").to(rank)
+        model = BertForMaskedLM.from_pretrained("pretraining_bert_1/pretrain_phase1_model_ddp").to(rank)
         model = DDP(model, device_ids=[rank])
 
         no_decay = ["bias", "LayerNorm.weight"]
@@ -56,7 +56,7 @@ def ddp_main(rank, world_size):
         optimizer = AdamW(optimizer_grouped_parameters, lr=5e-5)
 
         num_epochs = 20
-        patience = 5
+        patience = 3
         best_eval_loss = float("inf")
         epochs_no_improve = 0
         early_stop_triggered = False
@@ -107,14 +107,14 @@ def ddp_main(rank, world_size):
                         early_stop_triggered = True
 
         if rank == 0:
-            model.module.save_pretrained("pretrain_phase2_model_ddp")
-            tokenizer.save_pretrained("pretrain_phase2_tokenizer_ddp")
+            model.module.save_pretrained("pretraining_bert_2/pretrain_phase2_model_ddp")
+            tokenizer.save_pretrained("pretraining_bert_2/pretrain_phase2_tokenizer_ddp")
 
             pd.DataFrame({
                 "epoch": list(range(1, len(train_losses) + 1)),
                 "train_loss": train_losses,
                 "eval_loss": eval_losses
-            }).to_csv("loss_log_phase2_ddp.csv", index=False)
+            }).to_csv("pretraining_bert_2/loss_log_phase2_ddp.csv", index=False)
 
             plt.figure(figsize=(8, 5))
             plt.plot(range(1, len(train_losses) + 1), train_losses, label='Train Loss')
@@ -125,8 +125,8 @@ def ddp_main(rank, world_size):
             plt.legend()
             plt.grid(True)
             plt.tight_layout()
-            plt.savefig("pretrain_phase2_ddp_loss_curve.png")
-            plt.show()
+            plt.savefig("pretraining_bert_2/pretrain_phase2_ddp_loss_curve.png")
+            
 
         dist.destroy_process_group()
 

@@ -18,7 +18,7 @@ def clean_text(text):
     return text.strip()
 
 # CSVファイルの読み込み（ファイルパスを適宜修正）
-df = pd.read_csv("dengue_merged.csv")
+df = pd.read_csv("data/dengue_data/dengue_merged.csv")
 
 # 文単位に分割し、新しい行として展開
 split_rows = []
@@ -35,5 +35,5 @@ for idx, row in df.iterrows():
 
 
 df_split = pd.DataFrame(split_rows)
-df_split.to_csv("dengue_sentences.csv", index=False)
+df_split.to_csv("data/dengue_data/dengue_sentences.csv", index=False)
 print("✅ 正規化済み文データ saved to infectious_sentences.csv")

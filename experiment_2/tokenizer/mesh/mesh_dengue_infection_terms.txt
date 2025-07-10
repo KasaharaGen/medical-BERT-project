@@ -1,0 +1,785 @@
+abdominal abscess
+abortion, septic
+abscess
+acanthamoeba keratitis
+acanthocheilonemiasis
+acinetobacter infections
+acquired immunodeficiency syndrome
+actinobacillosis
+actinobacillus infections
+actinomycetales infections
+actinomycosis
+actinomycosis, cervicofacial
+acute retroviral syndrome
+adenophorea infections
+adenoviridae infections
+adenovirus infections, human
+african horse sickness
+african swine fever
+aids arteritis, central nervous system
+aids dementia complex
+aids-associated nephropathy
+aids-related complex
+aids-related opportunistic infections
+aleutian mink disease
+aliivibrio infections
+allergic fungal sinusitis
+alphavirus infections
+alternariosis
+amebiasis
+anaplasmataceae infections
+anaplasmosis
+ancylostomiasis
+aneurysm, infected
+angiomatosis, bacillary
+anisakiasis
+anthrax
+appendicitis
+arbovirus infections
+arenaviridae infections
+arterivirus infections
+arthritis, infectious
+arthritis, reactive
+ascariasis
+ascaridiasis
+ascaridida infections
+aspergillosis
+aspergillosis, allergic bronchopulmonary
+astroviridae infections
+asymptomatic infections
+avian leukosis
+avulavirus infections
+babesiosis
+bacillaceae infections
+bacteremia
+bacterial infections
+bacterial infections and mycoses
+bacterial zoonoses
+bacteriuria
+bacteroidaceae infections
+bacteroides infections
+balantidiasis
+bartonella infections
+bartonellaceae infections
+bell palsy
+bifidobacteriales infections
+birnaviridae infections
+blackwater fever
+blastocystis infections
+blastomycosis
+blood-borne infections
+bluetongue
+bone diseases, infectious
+border disease
+bordetella infections
+borna disease
+borrelia infections
+botulism
+boutonneuse fever
+bovine respiratory disease complex
+bovine virus diarrhea-mucosal disease
+brain abscess
+breakthrough infections
+bronchiolitis
+bronchiolitis, viral
+bronchitis
+bronchitis, chronic
+bronchopneumonia
+brucellosis
+brucellosis, bovine
+bunyaviridae infections
+burkholderia infections
+burkitt lymphoma
+buruli ulcer
+buschke-lowenstein tumor
+caliciviridae infections
+campylobacter infections
+candidemia
+candidiasis
+candidiasis, chronic mucocutaneous
+candidiasis, cutaneous
+candidiasis, invasive
+candidiasis, oral
+candidiasis, vulvovaginal
+carbuncle
+carcinoma, merkel cell
+cardiovascular infections
+cardiovirus infections
+cat-scratch disease
+catheter-related infections
+cellulitis
+central nervous system bacterial infections
+central nervous system fungal infections
+central nervous system helminthiasis
+central nervous system infections
+central nervous system parasitic infections
+central nervous system protozoal infections
+central nervous system viral diseases
+cerebral phaeohyphomycosis
+cerebral ventriculitis
+cestode infections
+chagas cardiomyopathy
+chagas disease
+chancre
+chancroid
+chickenpox
+chikungunya fever
+chlamydia infections
+chlamydiaceae infections
+chlamydial pneumonia
+chlamydophila infections
+cholera
+chromoblastomycosis
+ciliophora infections
+circoviridae infections
+classical swine fever
+clonorchiasis
+clostridium infections
+coccidioidal meningitis
+coccidioidomycosis
+coccidiosis
+coinfection
+colorado tick fever
+common cold
+communicable diseases
+communicable diseases, emerging
+communicable diseases, imported
+community-acquired infections
+community-acquired pneumonia
+condylomata acuminata
+conjunctivitis, acute hemorrhagic
+conjunctivitis, bacterial
+conjunctivitis, inclusion
+conjunctivitis, viral
+corneal ulcer
+coronaviridae infections
+coronavirus infections
+corynebacterium infections
+covid-19
+cowpox
+coxsackievirus infections
+creutzfeldt-jakob syndrome
+cross infection
+cryptococcosis
+cryptosporidiosis
+cyclosporiasis
+cysticercosis
+cytomegalovirus infections
+cytomegalovirus retinitis
+cytophagaceae infections
+deltaretrovirus infections
+dengue
+dermatomycoses
+desulfovibrionaceae infections
+dicrocoeliasis
+dictyocaulus infections
+dientamoebiasis
+digital dermatitis
+dipetalonema infections
+diphtheria
+diphyllobothriasis
+dirofilariasis
+discitis
+distemper
+dna virus infections
+dourine
+dracunculiasis
+dysentery, amebic
+dysentery, bacillary
+echinococcosis
+echinococcosis, hepatic
+echinococcosis, pulmonary
+echinostomiasis
+echovirus infections
+ecthyma
+ecthyma, contagious
+ectoparasitic infestations
+ectromelia, infectious
+ehrlichiosis
+elephantiasis, filarial
+empyema
+empyema, pleural
+empyema, subdural
+empyema, tuberculous
+encephalitis, arbovirus
+encephalitis, california
+encephalitis, herpes simplex
+encephalitis, japanese
+encephalitis, st. louis
+encephalitis, tick-borne
+encephalitis, varicella zoster
+encephalitis, viral
+encephalitozoonosis
+encephalomyelitis
+encephalomyelitis, eastern equine
+encephalomyelitis, enzootic porcine
+encephalomyelitis, equine
+encephalomyelitis, venezuelan equine
+encephalomyelitis, western equine
+encephalopathy, bovine spongiform
+endocarditis, bacterial
+endocarditis, subacute bacterial
+endophthalmitis
+endotoxemia
+enoplida infections
+entamoebiasis
+enteritis, transmissible, of turkeys
+enterobacteriaceae infections
+enterobiasis
+enterocolitis, pseudomembranous
+enterotoxemia
+enterovirus infections
+enzootic bovine leukosis
+ephemeral fever
+epidermodysplasia verruciformis
+epidural abscess
+epiglottitis
+epstein-barr virus infections
+equine infectious anemia
+erysipelas
+erysipeloid
+erysipelothrix infections
+erythema chronicum migrans
+erythema induratum
+erythema infectiosum
+erythrasma
+escherichia coli infections
+ethmoid sinusitis
+euglenozoa infections
+exanthema subitum
+extensively drug-resistant tuberculosis
+eye infections
+eye infections, bacterial
+eye infections, fungal
+eye infections, parasitic
+eye infections, viral
+fascioliasis
+fascioloidiasis
+feline acquired immunodeficiency syndrome
+feline infectious peritonitis
+feline panleukopenia
+filariasis
+filoviridae infections
+flaviviridae infections
+flavivirus infections
+flavobacteriaceae infections
+flea infestations
+focal infection
+focal infection, dental
+foot rot
+foot-and-mouth disease
+fournier gangrene
+fowlpox
+frontal sinusitis
+fungemia
+furunculosis
+fusariosis
+fusobacteriaceae infections
+fusobacterium infections
+gas gangrene
+gastroenteritis, transmissible, of swine
+geotrichosis
+gerstmann-straussler-scheinker disease
+giardiasis
+gingival pocket
+gingivitis
+gingivitis, necrotizing ulcerative
+glanders
+gnathostomiasis
+gonorrhea
+gram-negative bacterial infections
+gram-positive bacterial infections
+granuloma inguinale
+haemonchiasis
+haemophilus infections
+hand, foot and mouth disease
+hantavirus infections
+hantavirus pulmonary syndrome
+healthcare-associated pneumonia
+heartwater disease
+helicobacter infections
+helminthiasis
+helminthiasis, animal
+hemorrhagic fever with renal syndrome
+hemorrhagic fever, american
+hemorrhagic fever, crimean
+hemorrhagic fever, ebola
+hemorrhagic fever, omsk
+hemorrhagic fevers, viral
+hemorrhagic septicemia
+hemorrhagic septicemia, viral
+hemorrhagic syndrome, bovine
+henipavirus infections
+hepadnaviridae infections
+hepatitis a
+hepatitis b
+hepatitis b, chronic
+hepatitis c
+hepatitis c, chronic
+hepatitis d
+hepatitis d, chronic
+hepatitis e
+hepatitis, animal
+hepatitis, infectious canine
+hepatitis, viral, animal
+hepatitis, viral, human
+herpangina
+herpes genitalis
+herpes labialis
+herpes simplex
+herpes zoster
+herpes zoster ophthalmicus
+herpes zoster oticus
+herpesviridae infections
+hidradenitis suppurativa
+histoplasmosis
+hiv enteropathy
+hiv infections
+hiv seropositivity
+hiv wasting syndrome
+hiv-associated lipodystrophy syndrome
+hookworm infections
+hordeolum
+htlv-i infections
+htlv-ii infections
+hyalohyphomycosis
+hymenolepiasis
+hypodermyiasis
+impetigo
+infections
+infectious bovine rhinotracheitis
+infectious encephalitis
+infectious mononucleosis
+influenza in birds
+influenza, human
+insomnia, fatal familial
+intestinal diseases, parasitic
+intraabdominal infections
+invasive fungal infections
+invasive pulmonary aspergillosis
+isosporiasis
+kaposi varicelliform eruption
+keratitis, dendritic
+keratitis, herpetic
+keratoconjunctivitis, infectious
+king's evil
+klebsiella infections
+kuru
+kyasanur forest disease
+laboratory infection
+larva migrans
+larva migrans, visceral
+laryngitis
+lassa fever
+latent infection
+latent tuberculosis
+legionellosis
+legionnaires' disease
+leishmaniasis
+leishmaniasis, cutaneous
+leishmaniasis, diffuse cutaneous
+leishmaniasis, mucocutaneous
+leishmaniasis, visceral
+lemierre syndrome
+lentivirus infections
+leprosy
+leprosy, borderline
+leprosy, lepromatous
+leprosy, multibacillary
+leprosy, paucibacillary
+leprosy, tuberculoid
+leptospirosis
+leukemia, feline
+leukoencephalopathy, progressive multifocal
+leukoplakia, hairy
+lice infestations
+limbic encephalitis
+listeriosis
+liver abscess
+liver abscess, amebic
+liver abscess, pyogenic
+liver diseases, parasitic
+lobomycosis
+loiasis
+louping ill
+ludwig's angina
+lumpy skin disease
+lung abscess
+lung diseases, fungal
+lung diseases, parasitic
+lupus vasculitis, central nervous system
+lupus vulgaris
+lyme disease
+lyme neuroborreliosis
+lymphocytic choriomeningitis
+lymphogranuloma venereum
+malaria
+malaria, avian
+malaria, cerebral
+malaria, falciparum
+malaria, vivax
+malignant catarrh
+mansonelliasis
+marburg virus disease
+marek disease
+mastoiditis
+maxillary sinusitis
+measles
+melioidosis
+meningitis, bacterial
+meningitis, cryptococcal
+meningitis, escherichia coli
+meningitis, fungal
+meningitis, haemophilus
+meningitis, listeria
+meningitis, meningococcal
+meningitis, pneumococcal
+meningitis, viral
+meningococcal infections
+meningoencephalitis
+mesomycetozoea infections
+microsporidiosis
+mink viral enteritis
+mite infestations
+molluscum contagiosum
+monieziasis
+mononegavirales infections
+moraxellaceae infections
+morbillivirus infections
+mosquito-borne diseases
+mpox, monkeypox
+mucormycosis
+mumps
+murine acquired immunodeficiency syndrome
+mycetoma
+mycobacterium avium-intracellulare infection
+mycobacterium infections
+mycobacterium infections, nontuberculous
+mycoplasma infections
+mycoplasmatales infections
+mycoses
+myelitis
+myelitis, transverse
+myiasis
+myxomatosis, infectious
+nairobi sheep disease
+nasopharyngitis
+necatoriasis
+neisseriaceae infections
+nematode infections
+neonatal sepsis
+neuroaspergillosis
+neurocysticercosis
+neuroschistosomiasis
+neurosyphilis
+newcastle disease
+nidovirales infections
+nocardia infections
+oesophagostomiasis
+onchocerciasis
+onchocerciasis, ocular
+onychomycosis
+ophthalmia neonatorum
+opisthorchiasis
+opportunistic infections
+orthomyxoviridae infections
+osteomyelitis
+ostertagiasis
+otitis media, suppurative
+otomycosis
+oxyuriasis
+oxyurida infections
+panophthalmitis
+papillomavirus infections
+paracoccidioidomycosis
+paragonimiasis
+paramyxoviridae infections
+paraparesis, tropical spastic
+parasitemia
+parasitic diseases
+parasitic diseases, animal
+paratuberculosis
+paratyphoid fever
+paronychia
+parvoviridae infections
+pasteurella infections
+pasteurellaceae infections
+pasteurellosis, pneumonic
+pelvic infection
+pelvic inflammatory disease
+periapical abscess
+pericarditis, tuberculous
+perimeningeal infections
+periodontal abscess
+periostitis
+peritonitis
+peritonitis, tuberculous
+peritonsillar abscess
+persistent infection
+peste-des-petits-ruminants
+pestivirus infections
+petrositis
+phaeohyphomycosis
+pharyngitis
+phlebotomus fever
+picornaviridae infections
+piedra
+pinta
+piscirickettsiaceae infections
+plague
+pleurisy
+pleurodynia, epidemic
+pleuropneumonia
+pleuropneumonia, contagious
+pneumococcal infections
+pneumocystis infections
+pneumonia
+pneumonia of calves, enzootic
+pneumonia of swine, mycoplasmal
+pneumonia, aspiration
+pneumonia, bacterial
+pneumonia, lipid
+pneumonia, mycoplasma
+pneumonia, necrotizing
+pneumonia, pneumococcal
+pneumonia, pneumocystis
+pneumonia, progressive interstitial, of sheep
+pneumonia, rickettsial
+pneumonia, staphylococcal
+pneumonia, ventilator-associated
+pneumonia, viral
+pneumovirus infections
+poliomyelitis
+poliomyelitis, bulbar
+polyomavirus infections
+porcine postweaning multisystemic wasting syndrome
+porcine reproductive and respiratory syndrome
+post-acute covid-19 syndrome
+post-lyme disease syndrome
+postpoliomyelitis syndrome
+pott puffy tumor
+poult enteritis mortality syndrome
+poxviridae infections
+pregnancy complications, infectious
+pregnancy complications, parasitic
+prion diseases
+prosthesis-related infections
+proteus infections
+protozoan infections
+protozoan infections, animal
+pseudomonas infections
+pseudorabies
+psittacosis
+psoas abscess
+puerperal infection
+pulmonary adenomatosis, ovine
+pulmonary aspergillosis
+pyomyositis
+pythiosis
+pyuria
+q fever
+rabies
+rat-bite fever
+relapsing fever
+reoviridae infections
+reproductive tract infections
+respiratory syncytial virus infections
+respiratory tract infections
+respirovirus infections
+reticuloendotheliosis, avian
+retropharyngeal abscess
+retroviridae infections
+rhabditida infections
+rhabdoviridae infections
+rheumatic fever
+rheumatic heart disease
+rhinitis
+rhinoscleroma
+rhinosinusitis
+rhinosporidiosis
+rickettsia infections
+rickettsiaceae infections
+rift valley fever
+rinderpest
+rna virus infections
+rocky mountain spotted fever
+roseolovirus infections
+ross river virus infection
+rotavirus infections
+rubella
+rubella syndrome, congenital
+rubivirus infections
+rubulavirus infections
+salmonella food poisoning
+salmonella infections
+salmonella infections, animal
+sarcocystosis
+sarcoma, avian
+sarcoma, kaposi
+scabies
+scarlet fever
+schistosomiasis
+schistosomiasis haematobia
+schistosomiasis japonica
+schistosomiasis mansoni
+scrapie
+screw worm infection
+scrub typhus
+secernentea infections
+sepsis
+serratia infections
+setariasis
+severe acute respiratory syndrome
+severe dengue
+severe fever with thrombocytopenia syndrome
+sexually transmitted diseases
+sexually transmitted diseases, bacterial
+sexually transmitted diseases, viral
+shock, septic
+silicotuberculosis
+simian acquired immunodeficiency syndrome
+sinusitis
+skin diseases, bacterial
+skin diseases, infectious
+skin diseases, parasitic
+skin diseases, viral
+slow virus diseases
+smallpox
+soft tissue infections
+sparganosis
+sphenoid sinusitis
+spirochaetales infections
+spirurida infections
+spondylitis
+sporotrichosis
+spotted fever group rickettsiosis
+staphylococcal food poisoning
+staphylococcal infections
+staphylococcal scalded skin syndrome
+staphylococcal skin infections
+stomatitis, herpetic
+streptococcal infections
+strongyle infections, equine
+strongylida infections
+strongyloidiasis
+subacute sclerosing panencephalitis
+subdural effusion
+subphrenic abscess
+superinfection
+suppuration
+supraglottitis
+surgical wound infection
+swine erysipelas
+swine vesicular disease
+syphilis
+syphilis, cardiovascular
+syphilis, congenital
+syphilis, cutaneous
+syphilis, latent
+tabes dorsalis
+taeniasis
+tetanus
+theileriasis
+thyroiditis, suppurative
+tick infestations
+tick-borne diseases
+tinea
+tinea capitis
+tinea cruris
+tinea favosa
+tinea pedis
+tinea versicolor
+togaviridae infections
+tonsillitis
+torovirus infections
+toxascariasis
+toxemia
+toxocariasis
+toxoplasmosis
+toxoplasmosis, animal
+toxoplasmosis, cerebral
+toxoplasmosis, congenital
+toxoplasmosis, ocular
+tracheitis
+trachoma
+trematode infections
+trench fever
+treponemal infections
+trichinellosis
+trichomonas infections
+trichomonas vaginitis
+trichosporonosis
+trichostrongyloidiasis
+trichostrongylosis
+trichuriasis
+trombiculiasis
+trypanosomiasis
+trypanosomiasis, african
+trypanosomiasis, bovine
+tuberculoma
+tuberculoma, intracranial
+tuberculosis
+tuberculosis, avian
+tuberculosis, bovine
+tuberculosis, cardiovascular
+tuberculosis, central nervous system
+tuberculosis, cutaneous
+tuberculosis, endocrine
+tuberculosis, extrapulmonary
+tuberculosis, female genital
+tuberculosis, gastrointestinal
+tuberculosis, hepatic
+tuberculosis, laryngeal
+tuberculosis, lymph node
+tuberculosis, male genital
+tuberculosis, meningeal
+tuberculosis, miliary
+tuberculosis, multidrug-resistant
+tuberculosis, ocular
+tuberculosis, oral
+tuberculosis, osteoarticular
+tuberculosis, pleural
+tuberculosis, pulmonary
+tuberculosis, renal
+tuberculosis, spinal
+tuberculosis, splenic
+tuberculosis, urogenital
+tularemia
+tumor virus infections
+tungiasis
+typhlitis
+typhoid fever
+typhus, endemic flea-borne
+typhus, epidemic louse-borne
+ureaplasma infections
+urinary tract infections
+uveitis, suppurative
+vaccine-preventable diseases
+vaccinia
+vaginosis, bacterial
+varicella zoster virus infection
+vector borne diseases
+vesicular exanthema of swine
+vesicular stomatitis
+vibrio infections
+viral zoonoses
+viremia
+virus diseases
+visna
+warts
+wasting disease, chronic
+waterborne diseases
+waterhouse-friderichsen syndrome
+weil disease
+west nile fever
+whipple disease
+whooping cough
+wound infection
+yaws
+yellow fever
+yersinia infections
+yersinia pseudotuberculosis infections
+zika virus infection
+zoonoses
+zoster sine herpete
+zygomycosis
