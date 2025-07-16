@@ -2,7 +2,7 @@ import os
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
-from transformers import PreTrainedTokenizerFast, BertForMaskedLM, DataCollatorForLanguageModeling
+from transformers import PreTrainedTokenizerFast, BertForMaskedLM, BertConfig, DataCollatorForLanguageModeling
 import pandas as pd
 from torch.utils.data import Dataset, DataLoader, DistributedSampler
 from torch.optim import AdamW
@@ -23,9 +23,11 @@ class TextDataset(Dataset):
 
 def ddp_main(rank, world_size):
     try:
+        # === 通信初期化 ===
         dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
         torch.cuda.set_device(rank)
 
+        # === データ読み込み ===
         df = pd.read_csv('data/dengue_data/dengue_sentences.csv')
         texts = df["sentence"].dropna().astype(str).tolist()
         split_idx = int(len(texts) * 0.98)
@@ -43,26 +45,33 @@ def ddp_main(rank, world_size):
         train_loader = DataLoader(train_dataset, batch_size=32, sampler=train_sampler, collate_fn=collator)
         eval_loader = DataLoader(eval_dataset, batch_size=32, sampler=eval_sampler, collate_fn=collator)
 
-        model = BertForMaskedLM.from_pretrained("pretraining_bert_1/pretrain_phase1_model_ddp").to(rank)
+        # === モデルロード（Dropout強化） ===
+        config = BertConfig.from_pretrained("pretraining_bert_1/pretrain_phase1_model_ddp")
+        config.hidden_dropout_prob = 0.3  
+        model = BertForMaskedLM.from_pretrained("pretraining_bert_1/pretrain_phase1_model_ddp", config=config).to(rank)
         model = DDP(model, device_ids=[rank])
 
+        # === Optimizer & Scheduler ===
         no_decay = ["bias", "LayerNorm.weight"]
         optimizer_grouped_parameters = [
             {"params": [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)],
-             "weight_decay": 0.0001},
+             "weight_decay": 0.01},  
             {"params": [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)],
              "weight_decay": 0.0}
         ]
-        optimizer = AdamW(optimizer_grouped_parameters, lr=5e-5)
+        optimizer = AdamW(optimizer_grouped_parameters, lr=1e-6)
 
-        num_epochs = 20
-        patience = 3
+        # === Early Stopping パラメータ ===
+        num_epochs = 5
+        patience = 2
+        min_delta = 1e-4
         best_eval_loss = float("inf")
         epochs_no_improve = 0
         early_stop_triggered = False
 
         train_losses, eval_losses = [], []
 
+        # === 学習ループ ===
         for epoch in range(num_epochs):
             if early_stop_triggered:
                 break
@@ -83,6 +92,7 @@ def ddp_main(rank, world_size):
             avg_train_loss = total_train_loss / len(train_loader)
 
             if rank == 0:
+                # === 検証ループ ===
                 model.eval()
                 total_eval_loss = 0.0
                 with torch.no_grad():
@@ -94,10 +104,10 @@ def ddp_main(rank, world_size):
                 avg_eval_loss = total_eval_loss / len(eval_loader)
                 train_losses.append(avg_train_loss)
                 eval_losses.append(avg_eval_loss)
-                print(f"[Phase2] Epoch {epoch+1} - Train Loss: {avg_train_loss:.4f}, Eval Loss: {avg_eval_loss:.4f}")
+                print(f"[Phase2] Epoch {epoch+1} - Train Loss: {avg_train_loss:.6f}, Eval Loss: {avg_eval_loss:.6f}")
 
                 # === Early Stopping ===
-                if avg_eval_loss < best_eval_loss:
+                if avg_eval_loss < best_eval_loss - min_delta:
                     best_eval_loss = avg_eval_loss
                     epochs_no_improve = 0
                 else:
@@ -106,6 +116,7 @@ def ddp_main(rank, world_size):
                         print(f"[Phase2] Early stopping triggered at epoch {epoch+1}")
                         early_stop_triggered = True
 
+        # === モデル・結果保存 ===
         if rank == 0:
             model.module.save_pretrained("pretraining_bert_2/pretrain_phase2_model_ddp")
             tokenizer.save_pretrained("pretraining_bert_2/pretrain_phase2_tokenizer_ddp")
@@ -121,12 +132,11 @@ def ddp_main(rank, world_size):
             plt.plot(range(1, len(eval_losses) + 1), eval_losses, label='Eval Loss')
             plt.xlabel("Epoch")
             plt.ylabel("Loss")
-            plt.title("Phase2 DDP Training Loss with Early Stopping")
+            plt.title("Phase2 DDP Training Loss with Dropout 0.2")
             plt.legend()
             plt.grid(True)
             plt.tight_layout()
             plt.savefig("pretraining_bert_2/pretrain_phase2_ddp_loss_curve.png")
-            
 
         dist.destroy_process_group()
 
