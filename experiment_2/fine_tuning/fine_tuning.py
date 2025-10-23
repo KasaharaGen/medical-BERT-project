@@ -23,7 +23,7 @@ from transformers import (
 # ========= ユーザ設定 =========
 MODEL_DIR = "../pretraining_bert_2/pretrain_phase2_model_ddp"      # 事前学習済みBERTのディレクトリ
 TOKENIZER_DIR = "../pretraining_bert_2/pretrain_phase2_tokenizer_ddp"
-DATA_CSV  = "../ehr_dengue_binary.csv"  # text,label,(optional)patient_id
+DATA_CSV  = "../data/learning_data.csv"  # text,label,(optional)patient_id
 OUT_DIR   = "./results"          # 出力先
 NUM_EPOCHS = 6
 LR = 2e-5
