@@ -35,8 +35,7 @@ CSV_PATH = "../data/learning_data.csv"   # 単一CSV（text,label 列）
 OUTPUT_DIR = "./result"
 
 SEED = 128
-#BATCH_SIZE = 16 (best)
-BATCH_SIZE=8
+BATCH_SIZE = 4 #best
 MAX_LENGTH = 512
 LR = 1e-5
 NUM_EPOCHS = 15
@@ -377,8 +376,8 @@ def main():
         learning_rate=LR,
         lr_scheduler_type="cosine",
         warmup_ratio=0.08,
-        #weight_decay=0.001,(M)
-        weight_decay=0.003,
+        #weight_decay=0.003,(best)
+        weight_decay=0.005,
         logging_steps=LOGGING_STEPS,
         eval_strategy="steps",      
         eval_steps=EVAL_STEPS,
