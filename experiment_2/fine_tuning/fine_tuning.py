@@ -35,9 +35,10 @@ CSV_PATH = "../data/learning_data.csv"   # 単一CSV（text,label 列）
 OUTPUT_DIR = "./result"
 
 SEED = 128
+#BATCH_SIZE = 16 (best)
+BATCH_SIZE=8
 MAX_LENGTH = 512
-BATCH_SIZE = 16                # 実効は × GPU数（DDP）
-LR = 1e-6
+LR = 1e-5
 NUM_EPOCHS = 15
 USE_FP16 = True                # Quadro想定でfp16
 VAL_RATIO = 0.1                # validation 割合（残りから層化分割）
@@ -205,7 +206,7 @@ def distributed_test_eval_and_save(
     test_ds,
     tokenizer,
     output_dir: str,
-    per_device_batch_size: int = 32,
+    per_device_batch_size: int = BATCH_SIZE,
     use_fp16: bool = True,
 ):
     """
@@ -376,7 +377,8 @@ def main():
         learning_rate=LR,
         lr_scheduler_type="cosine",
         warmup_ratio=0.08,
-        weight_decay=0.01,
+        #weight_decay=0.001,(M)
+        weight_decay=0.003,
         logging_steps=LOGGING_STEPS,
         eval_strategy="steps",      
         eval_steps=EVAL_STEPS,
