@@ -6,6 +6,10 @@ output
 *.bin
 *.pth
 *.pt
+trial_*
+*.log
+checkpoint*
+experiment_2/fine_tuning/result/optuna_study
 
 experiment_1/pretraining_bert_1/pretrain_phase1_model_ddp
 experiment_1/pretraining_bert_1/pretrain_phase1_tokenizer_ddp
