@@ -38,7 +38,7 @@ SEED = 128
 BATCH_SIZE = 4 #best
 MAX_LENGTH = 512
 LR = 1e-5
-NUM_EPOCHS = 15
+NUM_EPOCHS = 5
 USE_FP16 = True                # Quadro想定でfp16
 VAL_RATIO = 0.1                # validation 割合（残りから層化分割）
 TEST_RATIO = 0.2               # test 割合（最初に層化分割）
@@ -360,7 +360,7 @@ def main():
         class_weight = torch.tensor([w0, w1], dtype=torch.float)
 
     # 5) モデル
-    config = AutoConfig.from_pretrained(MODEL_DIR, num_labels=2,hidden_dropout_prob=0.2,attention_probs_dropout_prob=0.2)
+    config = AutoConfig.from_pretrained(MODEL_DIR, num_labels=2,hidden_dropout_prob=0.2,attention_probs_dropout_prob=0.2,classifier_dropout=0.3)
     model = AutoModelForSequenceClassification.from_pretrained(MODEL_DIR, config=config)
 
     # 6) Collator
@@ -375,7 +375,8 @@ def main():
         per_device_eval_batch_size=BATCH_SIZE,
         learning_rate=LR,
         lr_scheduler_type="cosine",
-        warmup_ratio=0.08,
+        #warmup_ratio=0.08,(best)
+        warmup_ratio=0.1,
         #weight_decay=0.003,(best)
         weight_decay=0.005,
         logging_steps=LOGGING_STEPS,
@@ -385,7 +386,8 @@ def main():
         save_steps=EVAL_STEPS,
         save_total_limit=2,
         load_best_model_at_end=True,
-        metric_for_best_model="mcc",
+        #metric_for_best_model="mcc",
+        metric_for_best_model="eval_loss",
         greater_is_better=True,
         fp16=USE_FP16,
         bf16=False,
