@@ -1,75 +1,6 @@
-# build_dengue_text_dataset_en_nameless.py
-# -*- coding: utf-8 -*-
-"""
-Convert a binary-symptom CSV into English natural text + label dataset
-without including the 'name' column in the output.
-"""
-
 import argparse
-import hashlib
-import random
 from pathlib import Path
-import numpy as np
 import pandas as pd
-
-# --------------------------
-# English name lists
-# --------------------------
-FIRST_NAMES = [
-    "John","Emily","Michael","Sarah","David","Laura","James","Olivia","Daniel","Sophia",
-    "Robert","Emma","William","Ava","Joseph","Mia","Charles","Isabella","Thomas","Grace"
-]
-LAST_NAMES = [
-    "Smith","Johnson","Williams","Brown","Jones","Miller","Davis","Garcia","Rodriguez","Wilson",
-    "Martinez","Anderson","Taylor","Thomas","Hernandez","Moore","Martin","Jackson","Thompson","White"
-]
-
-# --------------------------
-# English verbs for symptoms
-# --------------------------
-POS_VERBS = [
-    "has", "shows", "complains of", "reports", "presents with", "experiences", "exhibits"
-]
-NEG_VERBS = [
-    "denies", "does not have", "shows no sign of", "reports no", "has no", "lacks", "no evidence of"
-]
-
-SYMPTOM_NAME_MAP = {}  # optional mapping if you want to rename symptoms
-
-
-# --------------------------
-# Helper functions
-# --------------------------
-def stable_hash_int(s: str, algo: str = "md5") -> int:
-    if algo == "md5":
-        return int(hashlib.md5(s.encode("utf-8")).hexdigest(), 16)
-    elif algo == "sha256":
-        return int(hashlib.sha256(s.encode("utf-8")).hexdigest(), 16)
-    raise ValueError("Unsupported hash algorithm.")
-
-
-def pretty_symptom(col: str) -> str:
-    if col in SYMPTOM_NAME_MAP:
-        return SYMPTOM_NAME_MAP[col]
-    return col.replace("_", " ").replace("-", " ")
-
-
-def choose_pos_verb(symptom: str) -> str:
-    h = stable_hash_int(symptom, "sha256")
-    return POS_VERBS[h % len(POS_VERBS)]
-
-
-def choose_neg_verb(symptom: str) -> str:
-    h = stable_hash_int("neg-" + symptom, "sha256")
-    return NEG_VERBS[h % len(NEG_VERBS)]
-
-
-def make_random_name(index: int, raw_id) -> str:
-    base = f"{index}-{raw_id}"
-    h = stable_hash_int(base, "md5")
-    first = FIRST_NAMES[h % len(FIRST_NAMES)]
-    last = LAST_NAMES[(h // 101) % len(LAST_NAMES)]
-    return f"{first} {last}"
 
 
 def coerce_binary(v) -> int:
@@ -80,76 +11,84 @@ def coerce_binary(v) -> int:
         return 0
 
 
-def build_text(row, i, id_col, label_col, symptom_cols, max_neg: int) -> tuple:
-    """Build one English sentence; exclude name column from output."""
-    name = make_random_name(i, row[id_col])
+def pretty_symptom(col: str) -> str:
+    # Make column names human-readable: fever_high -> "fever high"
+    return str(col).replace("_", " ").replace("-", " ").strip()
+
+
+def build_text_for_row(row, name: str, id_col: str, label_col: str, symptom_cols: list[str]) -> tuple[str, int]:
     positives, negatives = [], []
-
     for col in symptom_cols:
-        v = coerce_binary(row[col])
+        val = coerce_binary(row[col])
         sym = pretty_symptom(col)
-        if v == 1:
-            positives.append(f"{choose_pos_verb(sym)} {sym}")
+        if val == 1:
+            positives.append(sym)
         else:
-            negatives.append(f"{choose_neg_verb(sym)} {sym}")
+            negatives.append(sym)
 
+    segments = []
     if positives:
-        main = f"{name} " + ", ".join(positives) + "."
+        segments.append(f"{name} has " + ", ".join(positives) + ".")
     else:
-        main = f"{name} has no specific symptoms."
+        segments.append(f"{name} doesn't have any listed symptoms.")
 
     if negatives:
-        k = min(max_neg, len(negatives))
-        sampled = random.sample(negatives, k)
-        neg = " However, " + ", ".join(sampled) + "."
-    else:
-        neg = ""
+        segments.append(f"{name} doesn't have " + ", ".join(negatives) + ".")
 
-    text = main + neg
+    text = " ".join(segments)
     label = coerce_binary(row[label_col])
     return text, label
 
 
-def transform(input_csv: Path, output_csv: Path, seed: int = 42, max_neg: int = 5):
-    random.seed(seed)
-    np.random.seed(seed)
-
+def transform(input_csv: Path, output_csv: Path, unified_name: str = "Alex"):
     df = pd.read_csv(input_csv)
+    # Normalize headers
     df.columns = [str(c).strip() for c in df.columns]
 
-    id_col = df.columns[0]
-    label_col = "dengue"
-    if label_col not in df.columns:
-        candidates = [c for c in df.columns if c.lower().strip() in {"dengue","label","target"}]
-        if not candidates:
-            raise ValueError("No dengue column found.")
-        label_col = candidates[0]
+    # Assume first column is an ID-like field
+    if len(df.columns) < 2:
+        raise ValueError("Input CSV must have at least an ID column, a label column, and one symptom column.")
 
+    id_col = df.columns[0]
+
+    # Detect label column (prioritize 'dengue', fallback to common aliases)
+    label_col = None
+    if "dengue" in df.columns:
+        label_col = "dengue"
+    else:
+        for cand in df.columns:
+            if cand.lower() in {"label", "target"}:
+                label_col = cand
+                break
+    if label_col is None:
+        raise ValueError("Label column not found. Please include 'dengue' or 'label' or 'target'.")
+
+    # Symptom columns = all except id and label
     symptom_cols = [c for c in df.columns if c not in {id_col, label_col}]
     if not symptom_cols:
-        raise ValueError("No symptom columns detected.")
+        raise ValueError("No symptom columns detected. Ensure columns other than ID/label exist.")
 
     texts, labels = [], []
-    for i, row in df.iterrows():
-        text, label = build_text(row, i, id_col, label_col, symptom_cols, max_neg)
+    for _, row in df.iterrows():
+        text, label = build_text_for_row(row, unified_name, id_col, label_col, symptom_cols)
         texts.append(text)
         labels.append(label)
 
     out_df = pd.DataFrame({"text": texts, "label": labels})
     out_df.to_csv(output_csv, index=False)
-    print(f"[OK] Saved dataset: {output_csv} (rows={len(out_df)})")
-    print(f"[Info] Symptom columns: {symptom_cols}")
+    print(f"[OK] Saved: {output_csv}  rows={len(out_df)}")
+    print(f"[Info] Name used for all rows: {unified_name}")
+    print(f"[Info] Symptom columns ({len(symptom_cols)}): {symptom_cols}")
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Build an English dengue text dataset (no name column).")
-    p.add_argument("--input", type=Path, required=True)
-    p.add_argument("--output", type=Path, required=True)
-    p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--max_neg", type=int, default=5)
+    p = argparse.ArgumentParser(description="Refactor: simple text builder with unified name and has/doesn't have verbs.")
+    p.add_argument("--input", type=Path, required=True, help="Path to input CSV (e.g., row_data.csv)")
+    p.add_argument("--output", type=Path, required=True, help="Path to output CSV")
+    p.add_argument("--name", type=str, default="Alex", help="Unified name used for all samples (default: Alex)")
     return p.parse_args()
 
 
 if __name__ == "__main__":
     args = parse_args()
-    transform(args.input, args.output, seed=args.seed, max_neg=args.max_neg)
+    transform(args.input, args.output, unified_name=args.name)
