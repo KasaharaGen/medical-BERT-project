@@ -1,84 +1,61 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ==== 設定 ====
-PY=python
-SCRIPT=fine_tuning.py                              # あなたのPython本体
-RESULT_DIR=./result
-STUDY_DIR=${RESULT_DIR}/optuna_study
-STUDY_NAME=bert_bin_tuning_mcc
-DB_URI=sqlite:///${STUDY_DIR}/${STUDY_NAME}.db
+# ==== 設定（必要に応じて変更）====
+SCRIPT=fine_tuning.py
+GPUS=(0 1 2 3 4)          # 使用GPU
+TOTAL_TRIALS=2000          # 総試行数（例）
+DB_DIR=./result/optuna_study
+DB_PATH=${DB_DIR}/bert_bin_tuning_mcc.db
 
-# 総試行数（未指定なら100）
-TOTAL_TRIALS="${TOTAL_TRIALS:-100}"
+mkdir -p "${DB_DIR}"
 
-# GPU枚数の自動検出（失敗時は5）
-if command -v nvidia-smi >/dev/null 2>&1; then
-  NGPU="$(nvidia-smi --list-gpus | wc -l | xargs)"
-else
-  NGPU=5
-fi
-# 必要なら NGPU_OVERRIDE=5 などで上書き
-NGPU="${NGPU_OVERRIDE:-$NGPU}"
+NUM_WORKERS=${#GPUS[@]}
+BASE_TRIALS=$(( TOTAL_TRIALS / NUM_WORKERS ))
+REM=$(( TOTAL_TRIALS % NUM_WORKERS ))
 
-echo "[INFO] TOTAL_TRIALS=${TOTAL_TRIALS}"
-echo "[INFO] NGPU=${NGPU}"
+echo "==== Phase 0: 事前チェック ===="
+# スクリプト側のENABLE_TUNING=True を前提にする:contentReference[oaicite:1]{index=1}
+grep -q 'ENABLE_TUNING = True' "${SCRIPT}" || {
+  echo "[ERROR] ${SCRIPT} 内の ENABLE_TUNING を True にしてから実行すること。" >&2
+  exit 1
+}
+echo "DB: ${DB_PATH}"
+echo "総試行数: ${TOTAL_TRIALS} / ワーカー数: ${NUM_WORKERS}"
+echo "各ワーカー試行数: 基本 ${BASE_TRIALS} + 先頭 ${REM} ワーカーに +1"
 
-# 各ワーカーが担当する試行数（切り上げ）
-TRIALS_PER_WORKER=$(( (TOTAL_TRIALS + NGPU - 1) / NGPU ))
-echo "[INFO] TRIALS_PER_WORKER=${TRIALS_PER_WORKER}"
-
-mkdir -p "${STUDY_DIR}"
-
-# ==== 1) Optuna探索をGPU並列で実行 ====
-echo "[INFO] Start parallel Optuna workers..."
-PIDS=()
-for (( i=0; i<NGPU; i++ )); do
-  export CUDA_VISIBLE_DEVICES="${i}"
-  # 最後の1本をマスター（探索完了後にbest_params.json保存 & 本学習トリガ役）
-  if [[ "${i}" -eq "$((NGPU-1))" ]]; then
-    OPTUNA_MASTER=1
-  else
-    OPTUNA_MASTER=0
+echo
+echo "==== Phase 1: 探索のみ（5GPU 並列）===="
+pids=()
+for i in "${!GPUS[@]}"; do
+  gpu=${GPUS[$i]}
+  trials=${BASE_TRIALS}
+  if (( i < REM )); then
+    trials=$(( trials + 1 ))
   fi
 
-  echo "[INFO] launch worker on GPU=${i}, OPTUNA_MASTER=${OPTUNA_MASTER}"
+  echo "[GPU${gpu}] Worker 起動: TRIALS_PER_WORKER=${trials}"
+  # Phase1は全員 Worker 扱い（最終学習はしない）
+  CUDA_VISIBLE_DEVICES=${gpu} \
+  OPTUNA_MASTER=0 \
+  TRIALS_PER_WORKER=${trials} \
+  python "${SCRIPT}" &
 
-  STORAGE="${DB_URI}" \
-  TRIALS_PER_WORKER="${TRIALS_PER_WORKER}" \
-  ENABLE_TUNING=1 \
-  OPTUNA_MASTER="${OPTUNA_MASTER}" \
-  TOKENIZERS_PARALLELISM=false \
-  ${PY} "${SCRIPT}" &
-  PIDS+=($!)
+  pids+=($!)
 done
 
-# 全ワーカー終了待ち
-for pid in "${PIDS[@]}"; do
-  wait "${pid}"
+# すべての探索Worker終了を待つ
+for pid in "${pids[@]}"; do
+  wait "$pid"
 done
-echo "[INFO] All Optuna workers finished."
+echo "==== Phase 1 完了：全ワーカー探索終了 ===="
 
-# ==== 2) ベストパラメータ確認 ====
-BEST_JSON="${RESULT_DIR}/best_params.json"
-if [[ ! -f "${BEST_JSON}" ]]; then
-  echo "[ERROR] ${BEST_JSON} が見つからない。マスター側が正常終了したか確認せよ。"
-  exit 1
-fi
-echo "[INFO] Best params file: ${BEST_JSON}"
-cat "${BEST_JSON}"
+echo
+echo "==== Phase 2: master が最良ハイパラで最終学習 ===="
+# Phase2は探索を追加実行せず（0試行）、DBからbestを読み出して学習のみ:contentReference[oaicite:2]{index=2}
+CUDA_VISIBLE_DEVICES=${GPUS[0]} \
+OPTUNA_MASTER=1 \
+TRIALS_PER_WORKER=0 \
+python "${SCRIPT}"
 
-# ==== 3) 最良パラメータでDDP本学習（torchrun） ====
-# 重要: ENABLE_TUNING=False を付与して探索を無効化し、再学習のみ実行する
-echo "[INFO] Start final training with torchrun (DDP) using best params..."
-ENABLE_TUNING=False TOKENIZERS_PARALLELISM=false \
-torchrun --nproc_per_node="${NGPU}" \
-  --master_port=29571 \
-  "${SCRIPT}" \
-  2>&1 | tee "${RESULT_DIR}/final_ddp_train.log"
-
-echo "[INFO] Finished. Check artifacts under: ${RESULT_DIR}"
-echo "[INFO] - best_params.json"
-echo "[INFO] - test_metrics.json / test_metrics.csv"
-echo "[INFO] - test_confusion_matrix.csv / test_confusion_matrix.png"
-echo "[INFO] - curve_loss.png / curve_eval_metrics.png"
+echo "==== 全処理完了 ===="

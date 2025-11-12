@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 from typing import Optional, Tuple
 from pathlib import Path
+import shutil
 
 import torch
 from torch import nn
@@ -42,7 +43,7 @@ SEED = 42
 BATCH_SIZE = 16  # 既定値（探索で上書きされ得る）
 MAX_LENGTH = 512
 LR = 1e-6        # 既定値（探索で上書きされ得る）
-NUM_EPOCHS = 5
+NUM_EPOCHS = 3
 USE_FP16 = True
 VAL_RATIO = 0.1
 TEST_RATIO = 0.2
@@ -51,7 +52,7 @@ LOGGING_STEPS = 50
 
 # ==== チューニング設定 ====
 ENABLE_TUNING = True        # ← True でOptunaを有効化
-N_TRIALS = 20               # 試行数
+N_TRIALS = 50               # 試行数
 STUDY_DIR = os.path.join(OUTPUT_DIR, "optuna_study")  # DB保存先
 STUDY_NAME = "bert_bin_tuning_mcc"
 # ===========================
@@ -309,15 +310,15 @@ def objective(trial: optuna.Trial) -> float:
         class_weight = torch.tensor([w0, w1], dtype=torch.float)
 
     # === 探索空間 ===
-    lr = trial.suggest_float("learning_rate", 1e-7, 5e-5, log=True)
-    wd = trial.suggest_float("weight_decay", 1e-7, 1e-1, log=True)
-    warm = trial.suggest_float("warmup_ratio", 0.0, 0.2)
-    dr_hid = trial.suggest_float("hidden_dropout_prob", 0.0, 0.4)
-    dr_att = trial.suggest_float("attention_probs_dropout_prob", 0.0, 0.4)
-    dr_cls = trial.suggest_float("classifier_dropout", 0.0, 0.5)
-    lbl_smooth = trial.suggest_float("label_smoothing", 0.0, 0.2)
+    lr = trial.suggest_float("learning_rate", 1e-6, 1e-4, log=True)
+    wd = trial.suggest_float("weight_decay", 1e-6, 1e-4, log=True)
+    warm = trial.suggest_float("warmup_ratio", 0.0, 0.1)
+    dr_hid = trial.suggest_float("hidden_dropout_prob", 0.0, 0.1)
+    dr_att = trial.suggest_float("attention_probs_dropout_prob", 0.0, 0.1)
+    dr_cls = trial.suggest_float("classifier_dropout", 0.4, 0.6)
+    lbl_smooth = trial.suggest_float("label_smoothing", 0.0, 0.1)
     sched = trial.suggest_categorical("lr_scheduler_type", ["cosine", "linear", "cosine_with_restarts"])
-    per_bs = trial.suggest_categorical("per_device_train_batch_size", [8, 16, 32])
+    per_bs = trial.suggest_categorical("per_device_train_batch_size", [4,8,16,32])
     grad_acc = trial.suggest_categorical("gradient_accumulation_steps", [1, 2, 4])
 
     # model/config
@@ -522,12 +523,31 @@ if __name__ == "__main__":
                 }, f, indent=2, ensure_ascii=False)
             print(f"[INFO] Best parameters saved to: {best_json_path}")
 
-            # 最良パラメータで最終学習・テスト
+            # ======== 追加: 最良試行の学習曲線・履歴を集約コピー ========
+            # 各 trial は objective() 内で save_history_and_plots() を呼んでおり、
+            # history.csv / curve_loss.png / curve_eval_metrics.png が trial_XXX に出力済みである:contentReference[oaicite:2]{index=2}。
+            best_trial_dir = os.path.join(OUTPUT_DIR, f"trial_{study.best_trial.number:03d}")
+            best_artifacts_dir = os.path.join(OUTPUT_DIR, "best_trial")
+            os.makedirs(best_artifacts_dir, exist_ok=True)
+
+            for fname in ["history.csv", "curve_loss.png", "curve_eval_metrics.png", "val_metrics.json"]:
+                src = os.path.join(best_trial_dir, fname)
+                if os.path.exists(src):
+                    dst = os.path.join(best_artifacts_dir, fname)
+                    try:
+                        shutil.copy2(src, dst)
+                        print(f"[INFO] Copied best-trial artifact: {src} -> {dst}")
+                    except Exception as e:
+                        print(f"[WARN] Failed to copy {src}: {e}")
+                else:
+                    print(f"[INFO] Artifact not found (skipped): {src}")
+
+            # ======== 最良パラメータで最終学習・テスト ========
+            # main_train_once() 内で save_history_and_plots() と distributed_test_eval_and_save() を呼ぶため、
+            # ./result/ 配下に学習曲線（curve_*）と混同行列（test_confusion_matrix.png 他）が保存される実装である:contentReference[oaicite:3]{index=3}。
             main_train_once(best_params=study.best_trial.params)
         else:
             print("[INFO] Worker finished its share of trials. (No final training on worker)")
     else:
+        # ENABLE_TUNING=False の場合も、main_train_once() 内で学習曲線と混同行列が保存される:contentReference[oaicite:4]{index=4}。
         main_train_once()
-
-
-
