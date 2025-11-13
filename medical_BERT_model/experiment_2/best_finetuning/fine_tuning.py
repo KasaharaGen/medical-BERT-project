@@ -43,7 +43,7 @@ SEED = 42
 BATCH_SIZE = 16  # 既定値（探索で上書きされ得る）
 MAX_LENGTH = 512
 LR = 1e-6        # 既定値（探索で上書きされ得る）
-NUM_EPOCHS = 3
+NUM_EPOCHS = 5
 USE_FP16 = True
 VAL_RATIO = 0.1
 TEST_RATIO = 0.2
@@ -310,15 +310,23 @@ def objective(trial: optuna.Trial) -> float:
         class_weight = torch.tensor([w0, w1], dtype=torch.float)
 
     # === 探索空間 ===
-    lr = trial.suggest_float("learning_rate", 1e-7, 1e-3, log=True)
-    wd = trial.suggest_float("weight_decay", 1e-7, 1e-1, log=True)
+    # === 推奨探索空間案 (BERT 二値分類) ===
+
+    lr = trial.suggest_float("learning_rate", 1e-5, 7e-5, log=True)
+
+    wd = trial.suggest_float("weight_decay", 1e-4, 1e-1, log=True)
+
     warm = trial.suggest_float("warmup_ratio", 0.0, 0.2)
-    dr_hid = trial.suggest_float("hidden_dropout_prob", 0.0, 0.5)
-    dr_att = trial.suggest_float("attention_probs_dropout_prob", 0.0, 0.5)
+
+    dr_hid = trial.suggest_float("hidden_dropout_prob", 0.0, 0.3)
+    dr_att = trial.suggest_float("attention_probs_dropout_prob", 0.0, 0.3)
     dr_cls = trial.suggest_float("classifier_dropout", 0.0, 0.5)
-    lbl_smooth = trial.suggest_float("label_smoothing", 0.0, 0.5)
-    sched = trial.suggest_categorical("lr_scheduler_type", ["cosine", "linear", "cosine_with_restarts"])
-    per_bs = trial.suggest_categorical("per_device_train_batch_size", [4,8,16,32])
+
+    lbl_smooth = trial.suggest_float("label_smoothing", 0.0, 0.2)
+
+    sched = trial.suggest_categorical("lr_scheduler_type",["linear", "cosine"])
+
+    per_bs = trial.suggest_categorical("per_device_train_batch_size", [4, 8, 16, 32])
     grad_acc = trial.suggest_categorical("gradient_accumulation_steps", [1, 2, 4])
 
     # model/config

@@ -4,7 +4,7 @@ set -euo pipefail
 # ==== 設定（必要に応じて変更）====
 SCRIPT=fine_tuning.py
 GPUS=(0 1 2 3 4)          # 使用GPU
-TOTAL_TRIALS=2000          # 総試行数（例）
+TOTAL_TRIALS=100          # 総試行数（例）
 DB_DIR=./result/optuna_study
 DB_PATH=${DB_DIR}/bert_bin_tuning_mcc.db
 
