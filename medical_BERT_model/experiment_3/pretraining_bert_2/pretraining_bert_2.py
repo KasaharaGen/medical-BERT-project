@@ -11,6 +11,7 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import Dataset, DataLoader, DistributedSampler
+from torch.utils.data import Subset
 
 from transformers import (
     PreTrainedTokenizerFast,
@@ -59,6 +60,109 @@ class TextDataset(Dataset):
 
 
 # ===============================
+#  モデル微調整ユーティリティ（LLRD / 部分凍結 / LoRA任意）
+# ===============================
+def freeze_lower_layers(model, n_freeze: int = 0, freeze_embeddings: bool = False):
+    """
+    下位 n_freeze 層と必要に応じて埋め込み層を凍結する。
+    """
+    if freeze_embeddings:
+        for p in model.bert.embeddings.parameters():
+            p.requires_grad = False
+    if n_freeze > 0:
+        encoder_layers = model.bert.encoder.layer
+        for i in range(n_freeze):
+            for p in encoder_layers[i].parameters():
+                p.requires_grad = False
+
+
+def build_llrd_param_groups(model, base_lr: float, weight_decay: float,
+                            llrd_decay: float = 0.95):
+    """
+    LLRD: 下位層ほど学習率を小さくする（層ごとに lr *= llrd_decay）。
+    BERT-base（12層）想定。LayerNorm/bias は weight_decay=0。
+    pooler が None の場合に備えて安全に扱う。
+    """
+    no_decay = ["bias", "LayerNorm.weight"]
+    param_groups = []
+
+    # --- Embeddings ---
+    lr = base_lr * (llrd_decay ** 13)  # embeddings は最も低LR
+    emb_decay, emb_nodecay = [], []
+    for n, p in model.bert.embeddings.named_parameters():
+        if not p.requires_grad:
+            continue
+        (emb_nodecay if any(nd in n for nd in no_decay) else emb_decay).append(p)
+    if emb_decay:
+        param_groups.append({"params": emb_decay, "weight_decay": weight_decay, "lr": lr})
+    if emb_nodecay:
+        param_groups.append({"params": emb_nodecay, "weight_decay": 0.0, "lr": lr})
+
+    # --- Encoder layers (0..11) ---
+    for layer_idx in range(12):
+        layer = model.bert.encoder.layer[layer_idx]
+        lr = base_lr * (llrd_decay ** (12 - layer_idx))  # 上層ほど lr が大きい
+        decay_params, nodecay_params = [], []
+        for n, p in layer.named_parameters():
+            if not p.requires_grad:
+                continue
+            (nodecay_params if any(nd in n for nd in no_decay) else decay_params).append(p)
+        if decay_params:
+            param_groups.append({"params": decay_params, "weight_decay": weight_decay, "lr": lr})
+        if nodecay_params:
+            param_groups.append({"params": nodecay_params, "weight_decay": 0.0, "lr": lr})
+
+    # --- Pooler（存在する場合のみ） ---
+    pooler = getattr(model.bert, "pooler", None)
+    head_decay, head_nodecay = [], []
+    head_lr = base_lr
+    if pooler is not None:
+        for n, p in pooler.named_parameters():
+            if not p.requires_grad:
+                continue
+            (head_nodecay if any(nd in n for nd in no_decay) else head_decay).append(p)
+
+    # --- LM Head（常に最上層扱い） ---
+    for n, p in model.cls.named_parameters():
+        if not p.requires_grad:
+            continue
+        (head_nodecay if any(nd in n for nd in no_decay) else head_decay).append(p)
+
+    if head_decay:
+        param_groups.append({"params": head_decay, "weight_decay": weight_decay, "lr": head_lr})
+    if head_nodecay:
+        param_groups.append({"params": head_nodecay, "weight_decay": 0.0, "lr": head_lr})
+
+    return param_groups
+
+
+def maybe_apply_lora(model, r=8, alpha=16, dropout=0.05, target_modules=("query", "key", "value", "dense")):
+    """
+    LoRA/Adapter を任意で挿入（peft がある場合のみ）。ない場合はそのまま返す。
+    """
+    try:
+        from peft import LoraConfig, get_peft_model, TaskType
+    except Exception:
+        return model, False  # PEFT未導入
+
+    lora_targets = []
+    for name, module in model.named_modules():
+        if any(t in name for t in target_modules):
+            lora_targets.append(name)
+
+    lora_config = LoraConfig(
+        task_type=TaskType.TOKEN_CLS,  # MLMでも可動（分類タスク種別は学習自体には大勢に影響なし）
+        r=r,
+        lora_alpha=alpha,
+        lora_dropout=dropout,
+        bias="none",
+        target_modules=list(set(target_modules)),
+    )
+    model = get_peft_model(model, lora_config)
+    return model, True
+
+
+# ===============================
 #  DDP Worker （各GPUプロセス）
 # ===============================
 def ddp_worker(rank: int, world_size: int, hparams: dict, return_dict, save_model: bool):
@@ -92,23 +196,27 @@ def ddp_worker(rank: int, world_size: int, hparams: dict, return_dict, save_mode
         train_texts, eval_texts = texts[:split_idx], texts[split_idx:]
 
         # === Tokenizer ===
+        # Phase1保存構造（best_model / tokenizer）想定：tokenizerは tokenizer/ から読む
         tokenizer = PreTrainedTokenizerFast.from_pretrained(
-            "../pretraining_bert_1/pretraining_bert_best/best_model"
+            "../pretraining_bert_1/pretraining_bert_best/tokenizer"
         )
 
         # === Dataset / DataLoader ===
         max_length = 512
         mlm_probability = 0.15
-        batch_size = hparams["batch_size"]
+        batch_size = 32
 
         train_dataset = TextDataset(train_texts, tokenizer, max_length=max_length)
-        eval_dataset = TextDataset(eval_texts, tokenizer, max_length=max_length)
+        eval_dataset  = TextDataset(eval_texts,  tokenizer, max_length=max_length)
+
+        #train_dataset = Subset(train_dataset, range(min(1000, len(train_dataset))))
+        #eval_dataset  = Subset(eval_dataset,  range(min(1000, len(eval_dataset))))
 
         train_sampler = DistributedSampler(
             train_dataset, num_replicas=world_size, rank=rank, shuffle=True
         )
         eval_sampler = DistributedSampler(
-            eval_dataset, num_replicas=world_size, rank=rank, shuffle=False
+            eval_dataset,  num_replicas=world_size, rank=rank, shuffle=False
         )
 
         collator = DataCollatorForLanguageModeling(
@@ -132,51 +240,79 @@ def ddp_worker(rank: int, world_size: int, hparams: dict, return_dict, save_mode
             pin_memory=True,
         )
 
-        # === モデルロード（Dropout等は hparams で上書き） ===
-        config = BertConfig.from_pretrained(
-            "../pretraining_bert_1/pretraining_bert_best/best_model"
-        )
+        # === モデルロード（BERT-base 構造固定） ===
+        base_model_dir = "../pretraining_bert_1/pretraining_bert_best/best_model"
+        config = BertConfig.from_pretrained(base_model_dir)
+        # 構造を明示固定（念のため上書き）
+        config.hidden_size = 768
+        config.num_hidden_layers = 12
+        config.num_attention_heads = 12
+        config.intermediate_size = 3072
+        # dropout は探索パラメータで上書き
         config.hidden_dropout_prob = hparams["hidden_dropout"]
         config.attention_probs_dropout_prob = hparams["attention_dropout"]
 
-        model = BertForMaskedLM.from_pretrained(
-            "../pretraining_bert_1/pretraining_bert_best/best_model",
-            config=config,
-        ).to(device)
+        model = BertForMaskedLM.from_pretrained(base_model_dir, config=config).to(device)
+
+        # === 部分凍結（先頭/末尾の層を固定したい場合） ===
+        # 例：下位 n 層を凍結（中間破壊の抑制）。必要なときだけ値を >0 にする
+        n_freeze_lower = hparams.get("freeze_lower_n", 0)          # 推奨デフォルト: 0
+        freeze_embeddings = hparams.get("freeze_embeddings", False) # 推奨デフォルト: False
+        freeze_lower_layers(model, n_freeze_lower, freeze_embeddings)
+
+        # === 任意：LoRA/Adapter の導入（peft があれば有効化） ===
+        if hparams.get("use_lora", False):
+            model, lora_on = maybe_apply_lora(
+                model,
+                r=hparams.get("lora_r", 8),
+                alpha=hparams.get("lora_alpha", 16),
+                dropout=hparams.get("lora_dropout", 0.05),
+                target_modules=hparams.get("lora_targets", ("query", "key", "value", "dense")),
+            )
+            if (rank == 0) and (not lora_on):
+                print("[Phase2] PEFT未導入のためLoRAはスキップした")
+
         model = DDP(model, device_ids=[rank])
 
-        # === Optimizer & Scheduler ===
-        no_decay = ["bias", "LayerNorm.weight"]
-        optimizer_grouped_parameters = [
-            {
-                "params": [
-                    p
-                    for n, p in model.named_parameters()
-                    if not any(nd in n for nd in no_decay)
-                ],
-                "weight_decay": hparams["weight_decay"],
-            },
-            {
-                "params": [
-                    p
-                    for n, p in model.named_parameters()
-                    if any(nd in n for nd in no_decay)
-                ],
-                "weight_decay": 0.0,
-            },
-        ]
-        optimizer = AdamW(
-            optimizer_grouped_parameters,
-            lr=hparams["learning_rate"],
-        )
+        # === Optimizer & Scheduler （LLRD対応） ===
+        # LLRDの有無を切替
+        use_llrd = hparams.get("use_llrd", True)
+        if use_llrd:
+            param_groups = build_llrd_param_groups(
+                model.module,
+                base_lr=hparams["learning_rate"],
+                weight_decay=hparams["weight_decay"],
+                llrd_decay=hparams.get("llrd_decay", 0.95),
+            )
+            optimizer = AdamW(param_groups)
+        else:
+            # 従来の一括LR
+            no_decay = ["bias", "LayerNorm.weight"]
+            optimizer_grouped_parameters = [
+                {
+                    "params": [
+                        p for n, p in model.named_parameters()
+                        if p.requires_grad and not any(nd in n for nd in no_decay)
+                    ],
+                    "weight_decay": hparams["weight_decay"],
+                },
+                {
+                    "params": [
+                        p for n, p in model.named_parameters()
+                        if p.requires_grad and any(nd in n for nd in no_decay)
+                    ],
+                    "weight_decay": 0.0,
+                },
+            ]
+            optimizer = AdamW(optimizer_grouped_parameters, lr=hparams["learning_rate"])
 
-        num_epochs = hparams["num_epochs"]
-        patience = hparams["patience"]
-        min_delta = hparams["min_delta"]
+        num_epochs = 2
+        patience   = hparams["patience"]
+        min_delta  = hparams["min_delta"]
 
         num_update_steps_per_epoch = len(train_loader)
         max_train_steps = num_epochs * num_update_steps_per_epoch
-        warmup_steps = int(max_train_steps * hparams["warmup_ratio"])
+        warmup_steps    = int(max_train_steps * hparams["warmup_ratio"])
 
         lr_scheduler = get_scheduler(
             name=hparams["lr_scheduler_type"],
@@ -185,13 +321,13 @@ def ddp_worker(rank: int, world_size: int, hparams: dict, return_dict, save_mode
             num_training_steps=max_train_steps,
         )
 
-        best_eval_loss = float("inf")
+        best_eval_loss    = float("inf")
         epochs_no_improve = 0
-        early_stop = False
-        pruned = False
+        early_stop        = False
+        pruned            = False
 
         train_loss_history = []
-        eval_loss_history = []
+        eval_loss_history  = []
 
         # === 学習ループ ===
         for epoch in range(num_epochs):
@@ -200,7 +336,7 @@ def ddp_worker(rank: int, world_size: int, hparams: dict, return_dict, save_mode
             train_sampler.set_epoch(epoch)
 
             total_train_loss = 0.0
-            num_train_steps = 0
+            num_train_steps  = 0
 
             for batch in tqdm(
                 train_loader,
@@ -217,19 +353,19 @@ def ddp_worker(rank: int, world_size: int, hparams: dict, return_dict, save_mode
                 lr_scheduler.step()
 
                 total_train_loss += loss.item()
-                num_train_steps += 1
+                num_train_steps  += 1
 
             local_avg_train_loss = total_train_loss / max(1, num_train_steps)
 
-            # 全GPUで平均 train loss を計算
+            # 全GPU平均
             train_loss_tensor = torch.tensor(local_avg_train_loss, device=device)
             dist.all_reduce(train_loss_tensor, op=dist.ReduceOp.SUM)
             avg_train_loss = (train_loss_tensor / world_size).item()
 
-            # ---- Eval (全rankで実行) ----
+            # ---- Eval ----
             model.eval()
             total_eval_loss = 0.0
-            num_eval_steps = 0
+            num_eval_steps  = 0
 
             with torch.no_grad():
                 for batch in tqdm(
@@ -241,17 +377,17 @@ def ddp_worker(rank: int, world_size: int, hparams: dict, return_dict, save_mode
                     outputs = model(**batch)
                     loss = outputs.loss
                     total_eval_loss += loss.item()
-                    num_eval_steps += 1
+                    num_eval_steps  += 1
 
-            loss_tensor = torch.tensor(total_eval_loss, device=device)
+            loss_tensor  = torch.tensor(total_eval_loss, device=device)
             steps_tensor = torch.tensor(float(num_eval_steps), device=device)
 
-            dist.all_reduce(loss_tensor, op=dist.ReduceOp.SUM)
+            dist.all_reduce(loss_tensor,  op=dist.ReduceOp.SUM)
             dist.all_reduce(steps_tensor, op=dist.ReduceOp.SUM)
 
             avg_eval_loss = (loss_tensor / steps_tensor).item()
 
-            # ---- rank0 で early stopping & pruner 判定 & ログ ----
+            # ---- rank0: early stopping & pruner & ログ ----
             prune_flag = False
             if rank == 0:
                 print(
@@ -263,9 +399,9 @@ def ddp_worker(rank: int, world_size: int, hparams: dict, return_dict, save_mode
                     train_loss_history.append(avg_train_loss)
                     eval_loss_history.append(avg_eval_loss)
 
-                # Early Stopping（patience, min_delta）
+                # Early Stopping
                 if avg_eval_loss < best_eval_loss - min_delta:
-                    best_eval_loss = avg_eval_loss
+                    best_eval_loss    = avg_eval_loss
                     epochs_no_improve = 0
                 else:
                     epochs_no_improve += 1
@@ -281,9 +417,9 @@ def ddp_worker(rank: int, world_size: int, hparams: dict, return_dict, save_mode
                         print(f"[Phase2] Trial pruned at epoch {epoch+1}")
                         prune_flag = True
 
-            # early_stop / prune を全rankにブロードキャスト
+            # ブロードキャスト
             early_stop_tensor = torch.tensor(1 if early_stop else 0, device=device)
-            prune_tensor = torch.tensor(1 if prune_flag else 0, device=device)
+            prune_tensor      = torch.tensor(1 if prune_flag else 0, device=device)
 
             dist.broadcast(early_stop_tensor, src=0)
             dist.broadcast(prune_tensor, src=0)
@@ -291,7 +427,6 @@ def ddp_worker(rank: int, world_size: int, hparams: dict, return_dict, save_mode
             early_stop = bool(early_stop_tensor.item())
             prune_flag = bool(prune_tensor.item())
 
-            # prune 優先
             if prune_flag:
                 pruned = True
                 if rank == 0:
@@ -303,16 +438,14 @@ def ddp_worker(rank: int, world_size: int, hparams: dict, return_dict, save_mode
             if early_stop:
                 break
 
-        # rank0 から結果を親に返す
+        # rank0 戻り値／保存
         if rank == 0 and not pruned:
             return_dict["best_eval_loss"] = float(best_eval_loss)
             return_dict["pruned"] = False
 
-            # save_model=True のときのみモデル・ログ保存（Phase1と同構造）
             if save_model:
                 save_dir = hparams["save_dir"]
                 os.makedirs(save_dir, exist_ok=True)
-
                 model_dir = os.path.join(save_dir, "best_model")
                 tok_dir   = os.path.join(save_dir, "tokenizer")
                 os.makedirs(model_dir, exist_ok=True)
@@ -323,30 +456,19 @@ def ddp_worker(rank: int, world_size: int, hparams: dict, return_dict, save_mode
                 # トークナイザ
                 tokenizer.save_pretrained(tok_dir)
 
-                # loss ログ（loss_log.csv）
+                # loss ログ
                 pd.DataFrame(
                     {
                         "epoch": list(range(1, len(train_loss_history) + 1)),
                         "train_loss": train_loss_history,
-                        "eval_loss": eval_loss_history,
+                        "eval_loss":  eval_loss_history,
                     }
-                ).to_csv(
-                    os.path.join(save_dir, "loss_log.csv"),
-                    index=False,
-                )
+                ).to_csv(os.path.join(save_dir, "loss_log.csv"), index=False)
 
-                # loss curve（loss_curve.png）
+                # loss curve
                 plt.figure(figsize=(8, 5))
-                plt.plot(
-                    range(1, len(train_loss_history) + 1),
-                    train_loss_history,
-                    label="Train Loss",
-                )
-                plt.plot(
-                    range(1, len(eval_loss_history) + 1),
-                    eval_loss_history,
-                    label="Eval Loss",
-                )
+                plt.plot(range(1, len(train_loss_history) + 1), train_loss_history, label="Train Loss")
+                plt.plot(range(1, len(eval_loss_history) + 1),  eval_loss_history,  label="Eval Loss")
                 plt.xlabel("Epoch")
                 plt.ylabel("Loss")
                 plt.title("Phase2 DDP Training Loss")
@@ -371,38 +493,36 @@ def ddp_worker(rank: int, world_size: int, hparams: dict, return_dict, save_mode
 
 
 # ===============================
-#  Optuna 用ハイパーパラ構築（Phase2用）
+#  Optuna 用ハイパーパラ構築（Phase2推奨レンジ）
 # ===============================
 def build_hparams_from_trial(trial: optuna.trial.Trial) -> dict:
     hparams = {}
 
-    # 学習率・正則化
-    hparams["learning_rate"] = trial.suggest_float("learning_rate", 5e-6, 5e-5, log=True)
-    hparams["weight_decay"] = trial.suggest_float("weight_decay", 1e-6, 1e-5, log=True)
-
-    # warmup割合
-    hparams["warmup_ratio"] = trial.suggest_float("warmup_ratio", 0.0, 0.05)
-
-    # MLM マスク割合
-    #hparams["mlm_probability"] = trial.suggest_float("mlm_probability", 0.15, 0.25)
-
-    # バッチサイズ
-    hparams["batch_size"] = trial.suggest_categorical("batch_size", [8, 16, 32])
-
-    # max_length
-    #hparams["max_length"] = trial.suggest_categorical("max_length", [256, 512])
-
-    # dropout 系
-    hparams["hidden_dropout"] = trial.suggest_float("hidden_dropout", 0.1, 0.4)
+    # === 探索推奨（Phase2） ===
+    hparams["learning_rate"]     = trial.suggest_float("learning_rate", 5e-6, 5e-5, log=True)
+    hparams["weight_decay"]      = trial.suggest_float("weight_decay",  1e-6, 5e-3, log=True)
+    hparams["warmup_ratio"]      = trial.suggest_float("warmup_ratio",  0.0, 0.05)
+    hparams["hidden_dropout"]    = trial.suggest_float("hidden_dropout",    0.1, 0.4)
     hparams["attention_dropout"] = trial.suggest_float("attention_dropout", 0.1, 0.3)
+    hparams["lr_scheduler_type"] = trial.suggest_categorical("lr_scheduler_type", ["linear", "cosine"])
+    hparams["patience"]          = trial.suggest_int("patience",   2, 3)
+    hparams["min_delta"]         = trial.suggest_float("min_delta", 1e-5, 5e-4, log=True)
 
-    # スケジューラ
-    hparams["lr_scheduler_type"] = trial.suggest_categorical("lr_scheduler_type",["linear", "cosine"],)
+    # === 構造固定（BERT-base）なのでここでは触らない ===
+    # hidden_size=768, num_hidden_layers=12, num_attention_heads=12, intermediate_size=3072
 
-    # Epoch / Early stopping
-    hparams["num_epochs"] = trial.suggest_int("num_epochs", 5, 8)
-    hparams["patience"] = trial.suggest_int("patience", 2, 3)
-    hparams["min_delta"] = trial.suggest_float("min_delta", 1e-5, 5e-4, log=True)
+    # === 追加テク：LLRD / 凍結 / LoRA（任意で固定or探索も可） ===
+    hparams["use_llrd"]          = True
+    hparams["llrd_decay"]        = trial.suggest_float("llrd_decay", 0.90, 0.97)  # 上層ほど高LR
+    hparams["freeze_lower_n"]    = trial.suggest_int("freeze_lower_n", 0, 4)      # 下位0〜4層を凍結
+    hparams["freeze_embeddings"] = trial.suggest_categorical("freeze_embeddings", [False, True])
+
+    # LoRA（PEFTがあれば使用、なければ自動スキップ）
+    hparams["use_lora"]      = trial.suggest_categorical("use_lora", [False, True])
+    hparams["lora_r"]        = 8
+    hparams["lora_alpha"]    = 16
+    hparams["lora_dropout"]  = 0.05
+    hparams["lora_targets"]  = ("query", "key", "value", "dense")
 
     return hparams
 
@@ -413,9 +533,9 @@ def build_hparams_from_trial(trial: optuna.trial.Trial) -> dict:
 def objective(trial: optuna.trial.Trial) -> float:
     hparams = build_hparams_from_trial(trial)
 
-    # save_dir は探索中は使わないがキーだけ入れておく
+    # save_dir は探索中は未使用
     hparams["save_dir"] = "dummy_dir"
-    # pruner用に trial を埋め込む
+    # pruner用に trial を埋め込み
     hparams["trial"] = trial
 
     world_size = torch.cuda.device_count()
@@ -455,12 +575,14 @@ if __name__ == "__main__":
 
     # ===== Optuna 探索（Phase2 ドメイン学習） =====
     study = optuna.create_study(
+        study_name = 'phase_2',
         direction="minimize",
         pruner=MedianPruner(n_warmup_steps=1),
+        storage="sqlite:///optuna_phase2.db",
+        load_if_exists=True    
     )
 
-    # 試行回数は環境に応じて調整
-    study.optimize(objective, n_trials=10)
+    study.optimize(objective, n_trials=5)
 
     print("========== Phase2 Optuna Result ==========")
     print(f"Best trial number: {study.best_trial.number}")
@@ -469,27 +591,17 @@ if __name__ == "__main__":
     for k, v in study.best_trial.params.items():
         print(f"  {k}: {v}")
 
-    # ===== ベスト trial のパラメータで再学習し、ここで初めて保存 =====
+    # ===== ベスト trial で再学習し保存（Phase1と同じ構造：best_model/tokenizer/ログ） =====
     best_trial = study.best_trial
 
     class DummyTrial:
-        """best_trial.params から hparams を再構成するための簡易ラッパ"""
-        def __init__(self, params):
-            self.params = params
+        def __init__(self, params): self.params = params
+        def suggest_float(self, name, low, high, log=False):   return float(self.params[name])
+        def suggest_categorical(self, name, choices):           return self.params[name]
+        def suggest_int(self, name, low, high):                 return int(self.params[name])
 
-        def suggest_float(self, name, low, high, log=False):
-            return float(self.params[name])
-
-        def suggest_categorical(self, name, choices):
-            return self.params[name]
-
-        def suggest_int(self, name, low, high):
-            return int(self.params[name])
-
-    dummy_trial = DummyTrial(best_trial.params)
+    dummy_trial  = DummyTrial(best_trial.params)
     best_hparams = build_hparams_from_trial(dummy_trial)
-
-    # Phase2 出力先（Phase1 と同じ構造：best_model, tokenizer, loss_log, loss_curve）
     best_hparams["save_dir"] = "pretraining_bert_best"
 
     world_size = torch.cuda.device_count()

@@ -91,10 +91,6 @@ def ddp_worker(rank: int, world_size: int, hparams: dict, return_dict, save_mode
         df = pd.read_csv("../data/infection_data/infection_sentences.csv")
         sentences = df["sentence"].dropna().astype(str).tolist()
 
-        # 必要ならここでシャッフルしてもよい（全rank同じコードなので順序は同じになる）
-        # rng = np.random.default_rng(42)
-        # rng.shuffle(sentences)
-
         train_ratio = 0.98
         train_size = int(len(sentences) * train_ratio)
         train_texts = sentences[:train_size]
@@ -117,15 +113,14 @@ def ddp_worker(rank: int, world_size: int, hparams: dict, return_dict, save_mode
         # ==========================
         max_length = 512
         mlm_probability = 0.15
-        batch_size = hparams["batch_size"]
+        batch_size = 64  # 必要ならここを Optuna 対象に戻してよい
 
         train_dataset = TextDataset(train_texts, tokenizer, max_length=max_length)
-        eval_dataset = TextDataset(eval_texts, tokenizer, max_length=max_length)
+        eval_dataset  = TextDataset(eval_texts,  tokenizer, max_length=max_length)
 
-        
-        train_dataset = Subset(train_dataset, range(min(1000, len(train_dataset))))
-        eval_dataset  = Subset(eval_dataset,  range(min(1000, len(eval_dataset))))
-
+        # デバッグ／スモークテスト用のサブセット（不要なら外す）
+        #train_dataset = Subset(train_dataset, range(min(1000, len(train_dataset))))
+        #eval_dataset  = Subset(eval_dataset,  range(min(1000, len(eval_dataset))))
 
         train_sampler = DistributedSampler(
             train_dataset,
@@ -164,14 +159,14 @@ def ddp_worker(rank: int, world_size: int, hparams: dict, return_dict, save_mode
         )
 
         # ==========================
-        #  モデル構築
+        #  モデル構築（BERT-base 固定）
         # ==========================
         config = BertConfig(
             vocab_size=tokenizer.vocab_size,
-            hidden_size=hparams["hidden_size"],
-            num_hidden_layers=hparams["num_layers"],
-            num_attention_heads=hparams["num_heads"],
-            intermediate_size=hparams["intermediate_size"],
+            hidden_size=768,                 # 固定
+            num_hidden_layers=12,            # 固定
+            num_attention_heads=12,          # 固定（768 / 12 = 64）
+            intermediate_size=3072,          # 固定（標準は 4 * hidden）
             max_position_embeddings=512,
             hidden_dropout_prob=hparams["hidden_dropout"],
             attention_probs_dropout_prob=hparams["attention_dropout"],
@@ -189,12 +184,12 @@ def ddp_worker(rank: int, world_size: int, hparams: dict, return_dict, save_mode
             weight_decay=hparams["weight_decay"],
         )
 
-        num_epochs = hparams["num_epochs"]
-        patience = hparams["patience"]
+        num_epochs = 5
+        patience   = hparams["patience"]
 
         num_update_steps_per_epoch = len(train_loader)
         max_train_steps = num_epochs * num_update_steps_per_epoch
-        warmup_steps = int(max_train_steps * hparams["warmup_ratio"])
+        warmup_steps    = int(max_train_steps * hparams["warmup_ratio"])
 
         lr_scheduler = get_scheduler(
             name=hparams["lr_scheduler_type"],
@@ -206,14 +201,14 @@ def ddp_worker(rank: int, world_size: int, hparams: dict, return_dict, save_mode
         # ==========================
         #  学習ループ
         # ==========================
-        best_eval_loss = float("inf")
+        best_eval_loss   = float("inf")
         patience_counter = 0
-        early_stop = False
-        pruned = False
+        early_stop       = False
+        pruned           = False
 
         # save_model=True のときだけ履歴と図を残す
         train_loss_history = []
-        eval_loss_history = []
+        eval_loss_history  = []
 
         for epoch in range(num_epochs):
             # ---- Train ----
@@ -221,7 +216,7 @@ def ddp_worker(rank: int, world_size: int, hparams: dict, return_dict, save_mode
             train_sampler.set_epoch(epoch)
 
             total_train_loss = 0.0
-            num_train_steps = 0
+            num_train_steps  = 0
 
             for batch in tqdm(
                 train_loader,
@@ -239,7 +234,7 @@ def ddp_worker(rank: int, world_size: int, hparams: dict, return_dict, save_mode
                 lr_scheduler.step()
 
                 total_train_loss += loss.item()
-                num_train_steps += 1
+                num_train_steps  += 1
 
             # rankごとの平均 train loss
             local_avg_train_loss = total_train_loss / max(1, num_train_steps)
@@ -252,7 +247,7 @@ def ddp_worker(rank: int, world_size: int, hparams: dict, return_dict, save_mode
             # ---- Eval (全rankで実行) ----
             model.eval()
             total_eval_loss = 0.0
-            num_eval_steps = 0
+            num_eval_steps  = 0
 
             with torch.no_grad():
                 for batch in tqdm(
@@ -265,13 +260,13 @@ def ddp_worker(rank: int, world_size: int, hparams: dict, return_dict, save_mode
                     loss = outputs.loss
 
                     total_eval_loss += loss.item()
-                    num_eval_steps += 1
+                    num_eval_steps  += 1
 
             # rankごとの eval loss 合計とステップ数を all_reduce
-            loss_tensor = torch.tensor(total_eval_loss, device=device)
+            loss_tensor  = torch.tensor(total_eval_loss, device=device)
             steps_tensor = torch.tensor(float(num_eval_steps), device=device)
 
-            dist.all_reduce(loss_tensor, op=dist.ReduceOp.SUM)
+            dist.all_reduce(loss_tensor,  op=dist.ReduceOp.SUM)
             dist.all_reduce(steps_tensor, op=dist.ReduceOp.SUM)
 
             avg_eval_loss = (loss_tensor / steps_tensor).item()
@@ -288,9 +283,9 @@ def ddp_worker(rank: int, world_size: int, hparams: dict, return_dict, save_mode
                     train_loss_history.append(avg_train_loss)
                     eval_loss_history.append(avg_eval_loss)
 
-                # early stopping
+                # early stopping（ベスト更新時のみ保存）
                 if avg_eval_loss < best_eval_loss:
-                    best_eval_loss = avg_eval_loss
+                    best_eval_loss   = avg_eval_loss
                     patience_counter = 0
 
                     if save_model:
@@ -306,7 +301,7 @@ def ddp_worker(rank: int, world_size: int, hparams: dict, return_dict, save_mode
                             {
                                 "epoch": list(range(1, len(train_loss_history) + 1)),
                                 "train_loss": train_loss_history,
-                                "eval_loss": eval_loss_history,
+                                "eval_loss":  eval_loss_history,
                             }
                         ).to_csv(os.path.join(save_dir, "loss_log.csv"), index=False)
 
@@ -340,17 +335,16 @@ def ddp_worker(rank: int, world_size: int, hparams: dict, return_dict, save_mode
                 if ("trial" in hparams) and (not save_model):
                     trial = hparams["trial"]
                     trial.report(avg_eval_loss, step=epoch)
-
                     if trial.should_prune():
                         print(f"[Rank 0] Trial pruned at epoch {epoch+1}")
                         prune_flag = True
 
             # early_stop / prune フラグを全rankに共有
             early_stop_tensor = torch.tensor(1 if early_stop else 0, device=device)
-            prune_tensor = torch.tensor(1 if prune_flag else 0, device=device)
+            prune_tensor      = torch.tensor(1 if prune_flag else 0, device=device)
 
             dist.broadcast(early_stop_tensor, src=0)
-            dist.broadcast(prune_tensor, src=0)
+            dist.broadcast(prune_tensor,      src=0)
 
             early_stop = bool(early_stop_tensor.item())
             prune_flag = bool(prune_tensor.item())
@@ -388,42 +382,32 @@ def ddp_worker(rank: int, world_size: int, hparams: dict, return_dict, save_mode
 
 
 # ===============================
-#  Optuna 用ハイパーパラ構築
+#  Optuna 用ハイパーパラ構築（BERT-base 構造は固定）
 # ===============================
 def build_hparams_from_trial(trial: optuna.trial.Trial) -> dict:
     hparams = {}
+
     # 学習率・正則化
     hparams["learning_rate"] = trial.suggest_float("learning_rate", 1e-5, 5e-4, log=True)
-    hparams["weight_decay"] = trial.suggest_float("weight_decay", 1e-6, 1e-2, log=True)
-    
+    hparams["weight_decay"]  = trial.suggest_float("weight_decay",  1e-6, 1e-2, log=True)
+
     # warmup割合
-    hparams["warmup_ratio"] = trial.suggest_float("warmup_ratio", 0.01, 0.15)
-
-    # MLM マスク割合
-    #hparams["mlm_probability"] = trial.suggest_float("mlm_probability", 0.10, 0.25)
-
-    # バッチサイズ
-    hparams["batch_size"] = trial.suggest_categorical("batch_size", [16, 32, 64])
-
-    # max_length
-    #hparams["max_length"] = trial.suggest_categorical("max_length", [128, 256, 512])
+    hparams["warmup_ratio"]  = trial.suggest_float("warmup_ratio", 0.01, 0.15)
 
     # dropout 系
-    hparams["hidden_dropout"] = trial.suggest_float("hidden_dropout", 0.0, 0.3)
+    hparams["hidden_dropout"]    = trial.suggest_float("hidden_dropout",    0.0, 0.3)
     hparams["attention_dropout"] = trial.suggest_float("attention_dropout", 0.0, 0.2)
 
     # スケジューラ
-    hparams["lr_scheduler_type"] = trial.suggest_categorical("lr_scheduler_type",["linear", "cosine"])
+    hparams["lr_scheduler_type"] = trial.suggest_categorical(
+        "lr_scheduler_type", ["linear", "cosine"]
+    )
 
-    # モデルサイズ（hidden_size は num_heads で割り切れるようにしてある）
-    hparams["num_layers"] = trial.suggest_categorical("num_layers", [6, 8, 12])
-    hparams["hidden_size"] = trial.suggest_categorical("hidden_size", [384, 512, 768])
-    hparams["num_heads"] = trial.suggest_categorical("num_heads", [6, 8, 12])
-    hparams["intermediate_size"] = trial.suggest_categorical("intermediate_size", [2048, 2560, 3072, 4096])
+    # BERT-base 構造は固定（hidden_size=768, num_layers=12, num_heads=12, intermediate_size=3072）
+    # → ここでは探索しない
 
     # 学習エポックと early stopping 用 patience
-    hparams["num_epochs"] = trial.suggest_int("num_epochs", 5, 10)
-    hparams["patience"] = trial.suggest_int("patience", 2, 4)
+    hparams["patience"]   = trial.suggest_int("patience",   2, 4)
 
     return hparams
 
@@ -432,12 +416,8 @@ def build_hparams_from_trial(trial: optuna.trial.Trial) -> dict:
 #  Optuna Objective
 # ===============================
 def objective(trial: optuna.trial.Trial) -> float:
-    # ハイパーパラ取得
+    # ハイパーパラ取得（構造は固定）
     hparams = build_hparams_from_trial(trial)
-
-    # hidden_size と num_heads の整合性チェック
-    if hparams["hidden_size"] % hparams["num_heads"] != 0:
-        return float("inf")
 
     # 探索フェーズでは save_dir は使わないが、キーは用意しておく
     hparams["save_dir"] = "dummy_dir"
@@ -484,7 +464,7 @@ if __name__ == "__main__":
 
     # ===== Optuna で探索（prunerつき） =====
     study = optuna.create_study(
-        study_name = 'phase_1',
+        study_name='phase_1',
         direction="minimize",
         storage="sqlite:///optuna_phase1.db",
         load_if_exists=True,
@@ -492,7 +472,7 @@ if __name__ == "__main__":
     )
 
     # 試行回数は環境に応じて調整（ここでは例として 15）
-    study.optimize(objective, n_trials=15)
+    study.optimize(objective, n_trials=5)
 
     print("========== Optuna Result ==========")
     print(f"Best trial number: {study.best_trial.number}")
@@ -521,9 +501,6 @@ if __name__ == "__main__":
     dummy_trial = DummyTrial(best_trial.params)
     best_hparams = build_hparams_from_trial(dummy_trial)
 
-    if best_hparams["hidden_size"] % best_hparams["num_heads"] != 0:
-        raise ValueError("Best trial の hidden_size と num_heads が割り切れていない")
-
     best_hparams["save_dir"] = "pretraining_bert_best"
     # 最終学習では pruner を使わないので trial キーは持たせない
 
@@ -543,3 +520,5 @@ if __name__ == "__main__":
         )
 
     print("Final model saved in: pretraining_bert_best/")
+
+#{'learning_rate': 0.00016707717053270527, 'weight_decay': 0.0014551057527864568, 'warmup_ratio': 0.022546325260220136, 'batch_size': 64, 'hidden_dropout': 0.1323964613567746, 'attention_dropout': 0.1118470535270139, 'lr_scheduler_type': 'linear', 'num_layers': 12, 'hidden_size': 768, 'num_heads': 12, 'intermediate_size': 3072, 'num_epochs': 6, 'patience': 2}
