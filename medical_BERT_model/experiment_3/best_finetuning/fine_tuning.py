@@ -21,7 +21,7 @@ from sklearn.model_selection import train_test_split
 from transformers import (
     AutoTokenizer, AutoConfig, AutoModelForSequenceClassification,
     Trainer, TrainingArguments, DataCollatorWithPadding, set_seed,
-    TrainerCallback,
+    TrainerCallback,  # ★ 追加
 )
 from transformers.trainer import unwrap_model
 
@@ -126,7 +126,6 @@ class WeightedTrainer(Trainer):
         outputs = model(**model_inputs)
         logits = outputs.logits  # [B, 2]
 
-        # ★ クラス重み付き + label smoothing 付き CrossEntropy
         weight = self.class_weight.to(logits.device) if self.class_weight is not None else None
         loss_fct = nn.CrossEntropyLoss(label_smoothing=self.label_smoothing, weight=weight)
         loss = loss_fct(logits.view(-1, logits.size(-1)), labels.view(-1))
@@ -202,156 +201,75 @@ def distributed_test_eval_and_save(
     per_device_batch_size: int,
     use_fp16: bool,
 ):
-    """
-    全rankで test logits/probs を集約し、rank0 で MCC 最大となる閾値を探索して
-    混同行列・各種指標を保存する。
-    """
+    """全rankで集計 → rank0保存（単GPUチューニング時は world_size=1）。"""
     is_dist = dist.is_available() and dist.is_initialized()
     world_size = dist.get_world_size() if is_dist else 1
     rank = dist.get_rank() if is_dist else 0
 
     sampler = DistributedSampler(test_ds, shuffle=False) if is_dist else None
     data_collator = DataCollatorWithPadding(tokenizer, pad_to_multiple_of=8 if use_fp16 else None)
-    loader = DataLoader(
-        test_ds,
-        batch_size=per_device_batch_size,
-        shuffle=False,
-        sampler=sampler,
-        collate_fn=data_collator,
-        num_workers=4,
-        pin_memory=True,
-    )
+    loader = DataLoader(test_ds, batch_size=per_device_batch_size, shuffle=False,
+                        sampler=sampler, collate_fn=data_collator, num_workers=4, pin_memory=True)
 
-    device = (
-        f"cuda:{rank}" if torch.cuda.is_available() and is_dist
-        else ("cuda:0" if torch.cuda.is_available() else "cpu")
-    )
+    device = f"cuda:{rank}" if torch.cuda.is_available() and is_dist else ("cuda:0" if torch.cuda.is_available() else "cpu")
     base_model = unwrap_model(model).to(device)
     base_model.eval()
 
-    all_labels_local = []
-    all_scores_local = []  # P(y=1|x) を格納
-
+    tn = fp = fn = tp = 0
     amp_ctx = torch.cuda.amp.autocast(enabled=use_fp16 and torch.cuda.is_available())
     with amp_ctx:
         for batch in loader:
             input_ids = batch["input_ids"].to(device, non_blocking=True)
             attention_mask = batch["attention_mask"].to(device, non_blocking=True)
             labels = batch["labels"].cpu().numpy()
-
             logits = base_model(input_ids=input_ids, attention_mask=attention_mask).logits
-            probs = torch.softmax(logits, dim=-1)[:, 1].detach().cpu().numpy()  # positive クラスの確率
+            preds = logits.argmax(-1).cpu().numpy()
+            for y, p in zip(labels, preds):
+                if y == 0 and p == 0: tn += 1
+                elif y == 0 and p == 1: fp += 1
+                elif y == 1 and p == 0: fn += 1
+                else: tp += 1
 
-            all_labels_local.append(labels)
-            all_scores_local.append(probs)
-
-    if len(all_labels_local) == 0:
-        # 空のデータセット
-        if rank == 0:
-            print("[rank0] Empty test set. No metrics saved.")
-        return
-
-    labels_local = np.concatenate(all_labels_local)
-    scores_local = np.concatenate(all_scores_local)
-
-    # ====== 全 rank の結果を rank0 に集約 ======
+    cm_local = torch.tensor([tn, fp, fn, tp], device=device, dtype=torch.long)
     if is_dist:
-        gathered = [None for _ in range(world_size)]
-        dist.all_gather_object(gathered, (labels_local, scores_local))
-        if rank == 0:
-            ys = [g[0] for g in gathered]
-            ss = [g[1] for g in gathered]
-            labels_all = np.concatenate(ys)
-            scores_all = np.concatenate(ss)
-        else:
-            labels_all, scores_all = None, None
-    else:
-        labels_all, scores_all = labels_local, scores_local
-
-    if rank != 0:
-        return  # メトリクス計算・保存は rank0 のみ
-
-    # ====== 0.5 閾値での Mcc ======
-    preds_05 = (scores_all >= 0.5).astype(int)
-    cm_05 = confusion_matrix(labels_all, preds_05, labels=[0, 1])
-    mcc_05 = matthews_corrcoef(labels_all, preds_05)
-
-    # ====== MCC 最大化のための閾値探索 ======
-    thresholds = np.linspace(0.0, 1.0, 101)  # 0.00, 0.01, ..., 1.00
-    best_thr = 0.5
-    best_mcc = -1.0
-    best_cm = None
-
-    for thr in thresholds:
-        preds_thr = (scores_all >= thr).astype(int)
-        # すべて同じクラスになる閾値などでは MCC 計算が NaN になるのでガード
-        if len(np.unique(preds_thr)) < 2:
-            continue
-        mcc = matthews_corrcoef(labels_all, preds_thr)
-        if mcc > best_mcc:
-            best_mcc = mcc
-            best_thr = thr
-            best_cm = confusion_matrix(labels_all, preds_thr, labels=[0, 1])
-
-    # 念のためフォールバック
-    if best_cm is None:
-        best_cm = cm_05
-        best_mcc = mcc_05
-        best_thr = 0.5
-
-    tn, fp, fn, tp = best_cm.ravel()
+        dist.all_reduce(cm_local, op=dist.ReduceOp.SUM)
+    tn, fp, fn, tp = [int(x) for x in cm_local.tolist()]
     total = tn + fp + fn + tp
 
-    acc = (tp + tn) / total if total > 0 else 0.0
-    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-    f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
+    if rank == 0:
+        acc = (tp + tn) / total if total > 0 else 0.0
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        recall    = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        f1        = (2 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
+        denom = np.sqrt((tp + fp) * (tp + fn) * (tn + fp) * (tn + fn))
+        mcc = ((tp * tn - fp * fn) / denom) if denom > 0 else 0.0
 
-    test_metrics = {
-        "world_size": world_size,
-        # MCC最大化閾値での指標
-        "eval_accuracy": acc,
-        "eval_precision": precision,
-        "eval_recall": recall,
-        "eval_f1": f1,
-        "eval_mcc": best_mcc,
-        "eval_cm_00": int(tn),
-        "eval_cm_01": int(fp),
-        "eval_cm_10": int(fn),
-        "eval_cm_11": int(tp),
-        "best_threshold": float(best_thr),
-        # 参考として 0.5 閾値でのMCCも保存
-        "eval_mcc_thr_0_5": float(mcc_05),
-    }
+        test_metrics = {
+            "eval_accuracy": acc, "eval_precision": precision, "eval_recall": recall,
+            "eval_f1": f1, "eval_mcc": mcc,
+            "eval_cm_00": tn, "eval_cm_01": fp, "eval_cm_10": fn, "eval_cm_11": tp,
+            "world_size": world_size,
+        }
 
-    os.makedirs(output_dir, exist_ok=True)
-    with open(os.path.join(output_dir, "test_metrics.json"), "w") as f:
-        json.dump(test_metrics, f, indent=2, ensure_ascii=False)
-    pd.DataFrame([test_metrics]).to_csv(os.path.join(output_dir, "test_metrics.csv"), index=False)
+        os.makedirs(output_dir, exist_ok=True)
+        with open(os.path.join(output_dir, "test_metrics.json"), "w") as f:
+            json.dump(test_metrics, f, indent=2, ensure_ascii=False)
+        pd.DataFrame([test_metrics]).to_csv(os.path.join(output_dir, "test_metrics.csv"), index=False)
 
-    # 混同行列をCSV & 画像保存（MCC最大閾値での結果）
-    cm_df = pd.DataFrame(best_cm, index=["True_0", "True_1"], columns=["Pred_0", "Pred_1"])
-    cm_df.to_csv(os.path.join(output_dir, "test_confusion_matrix.csv"))
+        cm = np.array([[tn, fp], [fn, tp]], dtype=int)
+        cm_df = pd.DataFrame(cm, index=["True_0", "True_1"], columns=["Pred_0", "Pred_1"])
+        cm_df.to_csv(os.path.join(output_dir, "test_confusion_matrix.csv"))
 
-    plt.figure(figsize=(5, 4))
-    sns.heatmap(
-        cm_df,
-        annot=True,
-        fmt="d",
-        cmap="Blues",
-        cbar=True,
-        square=True,
-        linewidths=0.5,
-        annot_kws={"size": 14, "weight": "bold", "color": "black"},
-    )
-    plt.title(f"Test Confusion Matrix (best thr={best_thr:.2f})", fontsize=14)
-    plt.xlabel("Predicted Label")
-    plt.ylabel("True Label")
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, "test_confusion_matrix.png"), dpi=200)
-    plt.close()
+        plt.figure(figsize=(5, 4))
+        sns.heatmap(cm_df, annot=True, fmt="d", cmap="Blues", cbar=True, square=True,
+                    linewidths=0.5, annot_kws={"size": 14, "weight": "bold", "color": "black"})
+        plt.title("Test Confusion Matrix (All-Reduce Aggregated)", fontsize=14)
+        plt.xlabel("Predicted Label"); plt.ylabel("True Label")
+        plt.tight_layout()
+        plt.savefig(os.path.join(output_dir, "test_confusion_matrix.png"), dpi=200)
+        plt.close()
 
-    print("[rank0] aggregated test metrics with threshold search saved.")
+        print("[rank0] aggregated test metrics saved.")
 
 
 # ===== 共通: データ前処理（キャッシュ） =====
@@ -361,13 +279,11 @@ def get_or_build_dataset():
     if _DATASET_CACHE is None:
         dsd = build_datasets_from_single_csv(CSV_PATH, VAL_RATIO, TEST_RATIO, SEED)
         tok = AutoTokenizer.from_pretrained(TOKENIZER_DIR, use_fast=True)
-
         def _map(ds):
             ds = ds.map(lambda ex: tokenize_fn(ex, tok), batched=True, remove_columns=["text"])
             ds = ds.rename_column("label", "labels")
-            ds.set_format(type="torch", columns=["input_ids", "attention_mask", "labels"])
+            ds.set_format(type="torch", columns=["input_ids","attention_mask","labels"])
             return ds
-
         dsd = DatasetDict({
             "train": _map(dsd["train"]),
             "validation": _map(dsd["validation"]),
@@ -384,7 +300,7 @@ def objective(trial: optuna.Trial) -> float:
 
     dsd, tok = get_or_build_dataset()
 
-    # === class weight（クラス不均衡対策） ===
+    # class weight
     labels_np = np.array(dsd["train"]["labels"])
     pos, neg = int(labels_np.sum()), len(labels_np) - int(labels_np.sum())
     class_weight = None
@@ -394,8 +310,12 @@ def objective(trial: optuna.Trial) -> float:
         class_weight = torch.tensor([w0, w1], dtype=torch.float)
 
     # === 探索空間 ===
+    # === 推奨探索空間案 (BERT 二値分類) ===
+
     lr = trial.suggest_float("learning_rate", 1e-5, 7e-5, log=True)
+
     wd = trial.suggest_float("weight_decay", 1e-4, 1e-1, log=True)
+
     warm = trial.suggest_float("warmup_ratio", 0.0, 0.2)
 
     dr_hid = trial.suggest_float("hidden_dropout_prob", 0.0, 0.3)
@@ -404,15 +324,14 @@ def objective(trial: optuna.Trial) -> float:
 
     lbl_smooth = trial.suggest_float("label_smoothing", 0.0, 0.2)
 
-    sched = trial.suggest_categorical("lr_scheduler_type", ["linear", "cosine"])
+    sched = trial.suggest_categorical("lr_scheduler_type",["linear", "cosine"])
 
     per_bs = trial.suggest_categorical("per_device_train_batch_size", [4, 8, 16, 32])
     grad_acc = trial.suggest_categorical("gradient_accumulation_steps", [1, 2, 4])
 
     # model/config
     config = AutoConfig.from_pretrained(
-        MODEL_DIR,
-        num_labels=2,
+        MODEL_DIR, num_labels=2,
         hidden_dropout_prob=dr_hid,
         attention_probs_dropout_prob=dr_att,
         classifier_dropout=dr_cls,
@@ -449,7 +368,7 @@ def objective(trial: optuna.Trial) -> float:
         greater_is_better=True,
     )
 
-    # Optuna へ中間値を報告するコールバック
+    # Optuna へ中間値を報告するコールバック（★ TrainerCallback を継承）
     class OptunaReportCallback(TrainerCallback):
         def on_evaluate(self, args, state, control, metrics=None, **kwargs):
             if metrics and "eval_mcc" in metrics:
@@ -469,6 +388,7 @@ def objective(trial: optuna.Trial) -> float:
         label_smoothing=lbl_smooth,
     )
 
+    # 中間値報告（Optuna連携のためのコールバック）
     trainer.add_callback(OptunaReportCallback())
 
     trainer.train()
@@ -500,35 +420,24 @@ def main_train_once(best_params: dict = None):
     # データ・トークナイザー
     dsd, tok = get_or_build_dataset()
 
-    # === class weight（クラス不均衡対策） ===
-    labels_np = np.array(dsd["train"]["labels"])
-    pos, neg = int(labels_np.sum()), len(labels_np) - int(labels_np.sum())
+    # class weight
+    labels_np = np.array(dsd["train"]["labels"]); pos, neg = int(labels_np.sum()), len(labels_np)-int(labels_np.sum())
     class_weight = None
     if pos > 0 and neg > 0:
-        class_weight = torch.tensor(
-            [len(labels_np) / (2.0 * neg), len(labels_np) / (2.0 * pos)],
-            dtype=torch.float,
-        )
+        class_weight = torch.tensor([len(labels_np)/(2.0*neg), len(labels_np)/(2.0*pos)], dtype=torch.float)
 
     # 既定値
     hp = dict(
-        learning_rate=LR,
-        weight_decay=0.003,
-        warmup_ratio=0.1,
-        hidden_dropout_prob=0.2,
-        attention_probs_dropout_prob=0.0,
-        classifier_dropout=0.1,
-        label_smoothing=0.1,
-        lr_scheduler_type="cosine",
-        per_device_train_batch_size=BATCH_SIZE,
-        gradient_accumulation_steps=1,
+        learning_rate=LR, weight_decay=0.003, warmup_ratio=0.1,
+        hidden_dropout_prob=0.2, attention_probs_dropout_prob=0.0, classifier_dropout=0.1,
+        label_smoothing=0.1, lr_scheduler_type="cosine",
+        per_device_train_batch_size=BATCH_SIZE, gradient_accumulation_steps=1,
     )
     if best_params:
         hp.update(best_params)
 
     config = AutoConfig.from_pretrained(
-        MODEL_DIR,
-        num_labels=2,
+        MODEL_DIR, num_labels=2,
         hidden_dropout_prob=hp["hidden_dropout_prob"],
         attention_probs_dropout_prob=hp["attention_probs_dropout_prob"],
         classifier_dropout=hp["classifier_dropout"],
@@ -564,33 +473,23 @@ def main_train_once(best_params: dict = None):
     )
 
     trainer = WeightedTrainer(
-        model=model,
-        args=args,
-        train_dataset=dsd["train"],
-        eval_dataset=dsd["validation"],
-        tokenizer=tok,
-        data_collator=collator,
-        compute_metrics=compute_metrics,
-        class_weight=class_weight,
-        label_smoothing=hp["label_smoothing"],
+        model=model, args=args,
+        train_dataset=dsd["train"], eval_dataset=dsd["validation"],
+        tokenizer=tok, data_collator=collator, compute_metrics=compute_metrics,
+        class_weight=class_weight, label_smoothing=hp["label_smoothing"],
     )
 
     # 学習→検証→曲線保存
     trainer.train()
     _ = trainer.evaluate()
     if trainer.is_world_process_zero():
-        trainer.save_model(OUTPUT_DIR)
-        tok.save_pretrained(OUTPUT_DIR)
+        trainer.save_model(OUTPUT_DIR); tok.save_pretrained(OUTPUT_DIR)
         save_history_and_plots(trainer, OUTPUT_DIR)
 
-    # test（全rank→集約→保存, MCC最大閾値検索付き）
+    # test（全rank→集約→保存）
     distributed_test_eval_and_save(
-        model=trainer.model,
-        test_ds=dsd["test"],
-        tokenizer=tok,
-        output_dir=OUTPUT_DIR,
-        per_device_batch_size=hp["per_device_train_batch_size"],
-        use_fp16=USE_FP16,
+        model=trainer.model, test_ds=dsd["test"], tokenizer=tok,
+        output_dir=OUTPUT_DIR, per_device_batch_size=hp["per_device_train_batch_size"], use_fp16=USE_FP16,
     )
     print("Done.")
 
@@ -607,7 +506,7 @@ if __name__ == "__main__":
             pruner=MedianPruner(n_warmup_steps=3),
         )
 
-        # ★ 並列ワーカーごとに割り当てる trial 数
+        # ★ 並列ワーカーごとに割り当てる trial 数（合計でN_TRIALSになるよう調整）
         n_trials_this_worker = int(os.environ.get("TRIALS_PER_WORKER", N_TRIALS))
 
         study.optimize(objective, n_trials=n_trials_this_worker, gc_after_trial=True)
@@ -625,19 +524,16 @@ if __name__ == "__main__":
             best_json_path = os.path.join(OUTPUT_DIR, "best_params.json")
             os.makedirs(OUTPUT_DIR, exist_ok=True)
             with open(best_json_path, "w", encoding="utf-8") as f:
-                json.dump(
-                    {
-                        "trial_number": study.best_trial.number,
-                        "eval_mcc": study.best_trial.value,
-                        "params": study.best_trial.params,
-                    },
-                    f,
-                    indent=2,
-                    ensure_ascii=False,
-                )
+                json.dump({
+                    "trial_number": study.best_trial.number,
+                    "eval_mcc": study.best_trial.value,
+                    "params": study.best_trial.params,
+                }, f, indent=2, ensure_ascii=False)
             print(f"[INFO] Best parameters saved to: {best_json_path}")
 
-            # ======== 最良試行の学習曲線・履歴を集約コピー ========
+            # ======== 追加: 最良試行の学習曲線・履歴を集約コピー ========
+            # 各 trial は objective() 内で save_history_and_plots() を呼んでおり、
+            # history.csv / curve_loss.png / curve_eval_metrics.png が trial_XXX に出力済みである:contentReference[oaicite:2]{index=2}。
             best_trial_dir = os.path.join(OUTPUT_DIR, f"trial_{study.best_trial.number:03d}")
             best_artifacts_dir = os.path.join(OUTPUT_DIR, "best_trial")
             os.makedirs(best_artifacts_dir, exist_ok=True)
@@ -655,8 +551,11 @@ if __name__ == "__main__":
                     print(f"[INFO] Artifact not found (skipped): {src}")
 
             # ======== 最良パラメータで最終学習・テスト ========
+            # main_train_once() 内で save_history_and_plots() と distributed_test_eval_and_save() を呼ぶため、
+            # ./result/ 配下に学習曲線（curve_*）と混同行列（test_confusion_matrix.png 他）が保存される実装である:contentReference[oaicite:3]{index=3}。
             main_train_once(best_params=study.best_trial.params)
         else:
             print("[INFO] Worker finished its share of trials. (No final training on worker)")
     else:
+        # ENABLE_TUNING=False の場合も、main_train_once() 内で学習曲線と混同行列が保存される:contentReference[oaicite:4]{index=4}。
         main_train_once()
