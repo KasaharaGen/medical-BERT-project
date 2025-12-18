@@ -80,58 +80,54 @@ def build_llrd_param_groups(model, base_lr: float, weight_decay: float,
                             llrd_decay: float = 0.95):
     """
     LLRD: 下位層ほど学習率を小さくする（層ごとに lr *= llrd_decay）。
-    BERT-base（12層）想定。LayerNorm/bias は weight_decay=0。
-    pooler が None の場合に備えて安全に扱う。
+    - 重複登録を防ぐため seen セットで管理
+    - decoder.weight（埋め込みと weight tying）は LM ヘッド側からは登録しない
     """
     no_decay = ["bias", "LayerNorm.weight"]
     param_groups = []
+    seen = set()  # すでに登録したパラメータ（id）を記録
+
+    def add_group(params_list, wd, lr):
+        params = [p for p in params_list if p.requires_grad and (id(p) not in seen)]
+        if params:
+            for p in params:
+                seen.add(id(p))
+            param_groups.append({"params": params, "weight_decay": wd, "lr": lr})
 
     # --- Embeddings ---
-    lr = base_lr * (llrd_decay ** 13)  # embeddings は最も低LR
+    lr = base_lr * (llrd_decay ** 13)
     emb_decay, emb_nodecay = [], []
     for n, p in model.bert.embeddings.named_parameters():
-        if not p.requires_grad:
-            continue
         (emb_nodecay if any(nd in n for nd in no_decay) else emb_decay).append(p)
-    if emb_decay:
-        param_groups.append({"params": emb_decay, "weight_decay": weight_decay, "lr": lr})
-    if emb_nodecay:
-        param_groups.append({"params": emb_nodecay, "weight_decay": 0.0, "lr": lr})
+    add_group(emb_decay,    weight_decay, lr)
+    add_group(emb_nodecay,  0.0,          lr)
 
     # --- Encoder layers (0..11) ---
     for layer_idx in range(12):
         layer = model.bert.encoder.layer[layer_idx]
-        lr = base_lr * (llrd_decay ** (12 - layer_idx))  # 上層ほど lr が大きい
+        lr = base_lr * (llrd_decay ** (12 - layer_idx))  # 上層ほど lr 大
         decay_params, nodecay_params = [], []
         for n, p in layer.named_parameters():
-            if not p.requires_grad:
-                continue
             (nodecay_params if any(nd in n for nd in no_decay) else decay_params).append(p)
-        if decay_params:
-            param_groups.append({"params": decay_params, "weight_decay": weight_decay, "lr": lr})
-        if nodecay_params:
-            param_groups.append({"params": nodecay_params, "weight_decay": 0.0, "lr": lr})
+        add_group(decay_params,   weight_decay, lr)
+        add_group(nodecay_params, 0.0,          lr)
 
-    # --- Pooler（存在する場合のみ） ---
+    # --- Pooler（存在時のみ） ---
     pooler = getattr(model.bert, "pooler", None)
     head_decay, head_nodecay = [], []
     head_lr = base_lr
     if pooler is not None:
         for n, p in pooler.named_parameters():
-            if not p.requires_grad:
-                continue
             (head_nodecay if any(nd in n for nd in no_decay) else head_decay).append(p)
 
-    # --- LM Head（常に最上層扱い） ---
+    # --- LM Head（decoder.weight は weight tying のためスキップ） ---
     for n, p in model.cls.named_parameters():
-        if not p.requires_grad:
-            continue
+        if n.endswith("decoder.weight"):
+            continue  # embeddings と同一テンソルなので除外
         (head_nodecay if any(nd in n for nd in no_decay) else head_decay).append(p)
 
-    if head_decay:
-        param_groups.append({"params": head_decay, "weight_decay": weight_decay, "lr": head_lr})
-    if head_nodecay:
-        param_groups.append({"params": head_nodecay, "weight_decay": 0.0, "lr": head_lr})
+    add_group(head_decay,   weight_decay, head_lr)
+    add_group(head_nodecay, 0.0,          head_lr)
 
     return param_groups
 
@@ -306,7 +302,7 @@ def ddp_worker(rank: int, world_size: int, hparams: dict, return_dict, save_mode
             ]
             optimizer = AdamW(optimizer_grouped_parameters, lr=hparams["learning_rate"])
 
-        num_epochs = 2
+        num_epochs = 5
         patience   = hparams["patience"]
         min_delta  = hparams["min_delta"]
 
@@ -582,14 +578,14 @@ if __name__ == "__main__":
         load_if_exists=True    
     )
 
-    study.optimize(objective, n_trials=5)
+    '''study.optimize(objective, n_trials=5)
 
     print("========== Phase2 Optuna Result ==========")
     print(f"Best trial number: {study.best_trial.number}")
     print(f"Best eval loss   : {study.best_trial.value}")
     print("Best params:")
     for k, v in study.best_trial.params.items():
-        print(f"  {k}: {v}")
+        print(f"  {k}: {v}")'''
 
     # ===== ベスト trial で再学習し保存（Phase1と同じ構造：best_model/tokenizer/ログ） =====
     best_trial = study.best_trial
