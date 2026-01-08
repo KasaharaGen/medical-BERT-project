@@ -840,7 +840,7 @@ def run_optuna_ddp(args):
                 "label_smoothing": trial.suggest_float("label_smoothing", 0.0, 0.2),
                 "hidden_dropout_prob": trial.suggest_float("hidden_dropout_prob", 0.0, 0.3),
                 "classifier_dropout": trial.suggest_float("classifier_dropout", 0.0, 0.3),
-                "batch_size": trial.suggest_categorical("batch_size", [8, 16, 32]),
+                "batch_size": trial.suggest_categorical("batch_size", [16, 32, 64]),
                 "grad_accum": trial.suggest_categorical("grad_accum", [1, 2, 4]),
                 "epochs": trial.suggest_categorical("epochs", [2, 3, 4]),
                 # LoRA
