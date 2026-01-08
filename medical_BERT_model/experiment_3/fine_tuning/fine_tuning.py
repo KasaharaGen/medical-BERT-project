@@ -362,30 +362,39 @@ class DistillTrainer(Trainer):
         labels = inputs.get("labels")
         model_inputs = {k: v for k, v in inputs.items() if k != "labels"}
 
-        # student
-        out_s = model(**model_inputs)
-        logits_s = out_s.logits
+        # student forward
+        outputs_s = model(**model_inputs)
+        logits_s = outputs_s.logits
 
-        # teacher (frozen)
+        # ★ここが重要：teacherをstudentと同じdeviceへ
+        teacher_device = next(self.teacher_model.parameters()).device
+        student_device = logits_s.device
+        if teacher_device != student_device:
+            self.teacher_model.to(student_device)
+            self.teacher_model.eval()
+            for p in self.teacher_model.parameters():
+                p.requires_grad = False
+
+        # teacher forward (no grad)
         with torch.no_grad():
-            out_t = self.teacher_model(**model_inputs)
-            logits_t = out_t.logits
+            outputs_t = self.teacher_model(**model_inputs)
+            logits_t = outputs_t.logits
 
-        # CE
-        weight = self.class_weight.to(logits_s.device) if self.class_weight is not None else None
+        # CE loss
+        weight = self.class_weight.to(student_device) if self.class_weight is not None else None
         ce = nn.CrossEntropyLoss(weight=weight, label_smoothing=self.label_smoothing)
         loss_ce = ce(logits_s.view(-1, logits_s.size(-1)), labels.view(-1))
 
-        # KD
+        # KD loss
         T = self.temperature
         log_p_s = torch.log_softmax(logits_s / T, dim=-1)
         p_t = torch.softmax(logits_t / T, dim=-1)
         loss_kd = self.kl(log_p_s, p_t) * (T * T)
 
-        a = self.distill_alpha
-        loss = (1.0 - a) * loss_ce + a * loss_kd
+        alpha = self.distill_alpha
+        loss = (1.0 - alpha) * loss_ce + alpha * loss_kd
 
-        return (loss, out_s) if return_outputs else loss
+        return (loss, outputs_s) if return_outputs else loss
 
 
 # =========================================================
