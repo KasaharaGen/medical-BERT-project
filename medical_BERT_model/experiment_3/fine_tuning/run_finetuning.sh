@@ -8,7 +8,7 @@ export CUDA_VISIBLE_DEVICES=0
 
 PYTHON_BIN="${PYTHON_BIN:-python}"
 
-SCRIPT="fine_tuning_distill_optuna_ddp.py"
+SCRIPT="fine_tuning.py"
 
 STUDENT_MODEL_DIR="../pretraining_bert_2/pretraining_bert_best/best_model"
 TEACHER_MODEL_DIR="../pretraining_bert_2/pretraining_bert_best/best_model"

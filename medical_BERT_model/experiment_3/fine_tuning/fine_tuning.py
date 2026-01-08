@@ -661,10 +661,10 @@ def run_one_trial_train_eval(
         logging_steps=int(args.logging_steps),
         eval_strategy="steps",
         eval_steps=int(args.eval_steps),
-        save_strategy="steps",
+        save_strategy="no",
         save_steps=int(args.eval_steps),
         save_total_limit=1,
-        load_best_model_at_end=True,
+        load_best_model_at_end=False,
         metric_for_best_model="mcc",
         greater_is_better=True,
         seed=int(args.seed),
@@ -833,7 +833,7 @@ def run_optuna_ddp(args):
             # 重要: LoRAは条件付きにしている
             params = {
                 "lr": trial.suggest_float("lr", 1e-5, 5e-5, log=True),
-                "weight_decay": trial.suggest_float("weight_decay", 0.0, 1e-2, log=True),
+                "weight_decay": trial.suggest_float("weight_decay", 0.0, 1e-2),
                 "warmup_ratio": trial.suggest_float("warmup_ratio", 0.0, 0.2),
                 "distill_alpha": trial.suggest_float("distill_alpha", 0.1, 0.9),
                 "temperature": trial.suggest_float("temperature", 1.0, 4.0),
