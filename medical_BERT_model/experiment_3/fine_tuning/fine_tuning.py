@@ -844,7 +844,7 @@ def run_optuna_ddp(args):
                 "grad_accum": trial.suggest_categorical("grad_accum", [1, 2, 4]),
                 "epochs": trial.suggest_categorical("epochs", [2, 3, 4]),
                 # LoRA
-                "use_lora": trial.suggest_categorical("use_lora", [False, True]) if args.allow_lora_search else bool(args.use_lora),
+                "use_lora": True
             }
 
             if params["use_lora"]:
