@@ -660,56 +660,52 @@ def run_optuna(args) -> Dict[str, Any]:
         pruner=pruner,
     )
 
-    best_score = -1e9
-    if is_rank0() and len(study.trials) > 0 and study.best_trial is not None:
-        try:
-            best_score = float(study.best_value)
-        except Exception:
-            pass
+    trials_log_path = os.path.join(args.study_dir, "trials_log.csv")
+    if not os.path.exists(trials_log_path):
+        pd.DataFrame(columns=["trial_number", "eval_mcc", "eval_f1", "eval_accuracy", "best_threshold", "params_json"]).to_csv(
+            trials_log_path, index=False
+        )
 
-    # HPOループ
-    for t in range(args.n_trials):
-        # --- rank0: trialをaskしてparamsサンプル ---
-        if is_rank0():
-            trial = study.ask()
-            trial_number = trial.number
+    def objective(trial: optuna.Trial) -> float:
+        # 高優先: alpha/T範囲を絞る
+        params = {
+            # 最重要
+            "lr": trial.suggest_float("lr", 5e-6, 3e-4, log=True),
+            "distill_alpha": trial.suggest_float("distill_alpha", 0.2, 0.5),
+            "temperature": trial.suggest_float("temperature", 1.5, 3.0),
 
-            # 探索空間（必要に応じて追加）
-            # 重要: LoRAは条件付きにしている
-            params = {
-                "lr": trial.suggest_float("lr", 1e-5, 5e-5, log=True),
-                "weight_decay": trial.suggest_float("weight_decay", 0.0, 1e-2),
-                "warmup_ratio": trial.suggest_float("warmup_ratio", 0.0, 0.2),
-                "distill_alpha": trial.suggest_float("distill_alpha", 0.1, 0.9),
-                "temperature": trial.suggest_float("temperature", 1.0, 4.0),
-                "label_smoothing": trial.suggest_float("label_smoothing", 0.0, 0.2),
-                "hidden_dropout_prob": trial.suggest_float("hidden_dropout_prob", 0.0, 0.3),
-                "classifier_dropout": trial.suggest_float("classifier_dropout", 0.0, 0.3),
-                "batch_size": trial.suggest_categorical("batch_size", [8, 16, 32]),
-                "grad_accum": trial.suggest_categorical("grad_accum", [1, 2, 4]),
-                "epochs": trial.suggest_categorical("epochs", [2, 3, 4]),
-                # LoRA
-                "use_lora": True
-            }
+            # 次点
+            "weight_decay": trial.suggest_float("weight_decay", 0.0, 5e-2),
+            "warmup_ratio": trial.suggest_float("warmup_ratio", 0.0, 0.15),
+            "label_smoothing": trial.suggest_float("label_smoothing", 0.0, 0.1),
 
-            if params["use_lora"]:
-                params["lora_r"] = trial.suggest_categorical("lora_r", [4, 8, 16])
-                params["lora_alpha"] = trial.suggest_categorical("lora_alpha", [8, 16, 32])
-                params["lora_dropout"] = trial.suggest_float("lora_dropout", 0.0, 0.1)
-                params["lora_targets"] = args.lora_targets
+            "hidden_dropout_prob": trial.suggest_float("hidden_dropout_prob", 0.0, 0.2),
+            "classifier_dropout": trial.suggest_float("classifier_dropout", 0.0, 0.4),
 
-            ctrl = {"trial_number": trial_number, "params": params, "stop": False}
-        else:
-            trial = None
-            ctrl = None
+            # 実効バッチ
+            "batch_size": trial.suggest_categorical("batch_size", [8, 16]),
+            "grad_accum": trial.suggest_categorical("grad_accum", [1, 2, 4, 8]),
 
-        # --- 全rankへbroadcast ---
-        ctrl = bcast_object(ctrl, src=0)
-        if ctrl.get("stop", False):
-            break
+            # 固定（探索を広げない）
+            "epochs": args.epochs,
+            "max_length": args.max_length,
+            "lr_scheduler_type": args.lr_scheduler_type,
 
-        trial_number = int(ctrl["trial_number"])
-        params = dict(ctrl["params"])
+            # LoRA（使う方針なら固定ON推奨）
+            "use_lora": bool(args.use_lora),
+            "lora_targets": args.lora_targets,
+        }
+
+        if params["use_lora"]:
+            params["lora_r"] = trial.suggest_categorical("lora_r", [4, 8, 16])
+            # alphaはrに合わせて絞る（無駄探索削減）
+            if params["lora_r"] == 4:
+                params["lora_alpha"] = trial.suggest_categorical("lora_alpha", [8, 16])
+            elif params["lora_r"] == 8:
+                params["lora_alpha"] = trial.suggest_categorical("lora_alpha", [16, 32])
+            else:
+                params["lora_alpha"] = trial.suggest_categorical("lora_alpha", [32, 64])
+            params["lora_dropout"] = trial.suggest_float("lora_dropout", 0.0, 0.1)
 
         # trial_dirは作らない（保存しない）。output_dirは使い捨てでOKだが、Trainerはoutput_dir必須なので一時dirにする
         tmp_dir = os.path.join(args.study_dir, "_tmp_run")
