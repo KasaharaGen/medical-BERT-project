@@ -1,54 +1,56 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# =========================
-# 設定（ここを自分の環境に合わせて変更）
-# =========================
-export CUDA_VISIBLE_DEVICES=0
+ENV_NAME="gen"
+PROJECT_ROOT="/home/gonken2020/gen/medical-BERT-project/medical_BERT_model/experiment_3/fine_tuning"
+PYTHON_BIN="$HOME/anaconda3/envs/${ENV_NAME}/bin/python"
 
-PYTHON_BIN="${PYTHON_BIN:-python}"
+STUDENT_MODEL_DIR="/home/gonken2020/gen/medical-BERT-project/medical_BERT_model/experiment_3/pretraining_bert_2/pretraining_bert_best/best_model"
+TEACHER_BASE_DIR="${STUDENT_MODEL_DIR}"
+TOKENIZER_DIR="/home/gonken2020/gen/medical-BERT-project/medical_BERT_model/experiment_3/pretraining_bert_2/pretraining_bert_best/tokenizer"
 
-SCRIPT="fine_tuning.py"
+CSV_PATH="/home/gonken2020/gen/medical-BERT-project/data/learning_data.csv"
 
-STUDENT_MODEL_DIR="../pretraining_bert_2/pretraining_bert_best/best_model"
-TEACHER_MODEL_DIR="../pretraining_bert_2/pretraining_bert_best/best_model"
-TOKENIZER_DIR="../pretraining_bert_2/pretraining_bert_best/tokenizer"
-CSV_PATH="../data/learning_data.csv"
+OUT_DIR="${PROJECT_ROOT}/result_kfold_kd_lora_single"
+STUDY_DIR="${OUT_DIR}/optuna_study"  # 使わないが引数上必要なので作る
 
-OUT_DIR="./result_distill_single"
-STUDY_DIR="${OUT_DIR}/optuna_study"
-
-N_TRIALS=30
-SEED=42
-
-# VRAMが厳しければ max_length を落とす（512→256など）
-MAX_LENGTH=512
-
-# =========================
-# 実行
-# =========================
 mkdir -p "${OUT_DIR}" "${STUDY_DIR}"
+cd "${PROJECT_ROOT}"
 
-LOG="${OUT_DIR}/run_optuna_$(date +%Y%m%d_%H%M%S).log"
-
-echo "[INFO] start: $(date)"
-echo "[INFO] CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
-echo "[INFO] output_dir=${OUT_DIR}"
-echo "[INFO] study_dir=${STUDY_DIR}"
-echo "[INFO] log=${LOG}"
-
-"${PYTHON_BIN}" -u "${SCRIPT}" \
+"${PYTHON_BIN}" fine_tuning.py \
   --student_model_dir "${STUDENT_MODEL_DIR}" \
-  --teacher_model_dir "${TEACHER_MODEL_DIR}" \
+  --teacher_base_dir  "${TEACHER_BASE_DIR}" \
   --tokenizer_dir     "${TOKENIZER_DIR}" \
   --csv               "${CSV_PATH}" \
   --output_dir        "${OUT_DIR}" \
-  --use_optuna \
   --study_dir         "${STUDY_DIR}" \
-  --n_trials          "${N_TRIALS}" \
-  --seed              "${SEED}" \
-  --max_length        "${MAX_LENGTH}" \
+  --use_kfold \
+  --n_splits 5 \
+  --test_ratio 0.2 \
   --final_train_best \
-  2>&1 | tee "${LOG}"
+  --max_length 512 \
+  --batch_size 8 \
+  --grad_accum 4 \
+  --epochs 3 \
+  --teacher_epochs 2 \
+  --distill_alpha 0.35 \
+  --temperature 2.0 \
+  --rep_beta 0.5 \
+  --prior_tau 1.0 \
+  --class_weight_power 0.5 \
+  --class_weight_clip 3.0 \
+  --lr 5e-5 \
+  --weight_decay 0.01 \
+  --warmup_ratio 0.1 \
+  --label_smoothing 0.05 \
+  --amp fp16 \
+  --cm_percent_mode all \
+  --use_lora \
+  --lora_targets "query,key,value,dense" \
+  --lora_r 8 \
+  --lora_alpha 16 \
+  --lora_dropout 0.05
 
-echo "[INFO] done: $(date)"
+echo "[INFO] Done. Outputs:"
+echo "  - Final test CM (Blues%): ${OUT_DIR}/final/test_confusion_matrix_percent_blues.png"
+echo "  - Test metrics (fixed thr): ${OUT_DIR}/final/test_metrics_fixed_threshold.json"
