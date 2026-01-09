@@ -2,13 +2,23 @@
 # -*- coding: utf-8 -*-
 
 """
-fine_tuning.py (refactored, robust predict fix)
+fine_tuning.py (refactored)
 
-追加修正（今回のエラー対応）:
-- Trainer.predict(ds_va) を使わず、DataLoader + DataCollatorWithPadding で logits を自前で収集する
-  -> preds.predictions が ragged（例: 702と13が混在）になる問題を根絶する
+追加要件（今回）:
+- 成果物として curve_eval_metrics.png, curve_loss.png を出力する（以前と同様）
 
-要求仕様:
+実装方針:
+- Trainerのlogging/evaluateイベントをCallbackでフックし、学習中の
+  - train_loss（logging）
+  - eval_loss（evaluate時のmetrics）
+  - eval_mcc/eval_f1/eval_acc（evaluate時に「自前推論 + 閾値最適化」で算出）
+  を時系列で保存し、matplotlibで2枚のpngを生成する。
+
+重要:
+- ragged predictions 問題回避のため、評価指標計算は Trainer の予測結果に依存せず、
+  predict_logits_with_dataloader() を必ず使う。
+
+要求仕様（継続）:
 - 混同行列: Blues に統一 + セル内は%表記（all or true）
 - Validation(OOF)で閾値最適化 -> Testは固定閾値で評価
 - Logit Adjustment / Prior補正
@@ -17,9 +27,6 @@ fine_tuning.py (refactored, robust predict fix)
 - Teacher強化（foldごとにTeacher教師ありFT -> そのTeacherでStudent蒸留）
 - Stratified K-fold（testは固定分割、trainvalはK-fold）
 - GPU 1枚前提（DDPなし）
-
-依存:
-- transformers, datasets, sklearn, optuna, matplotlib
 - LoRAはpeftがあればstudentに適用可能（teacherには適用しない）
 """
 
@@ -55,6 +62,7 @@ from transformers import (
     TrainingArguments,
     DataCollatorWithPadding,
     set_seed,
+    TrainerCallback,
 )
 
 import matplotlib.pyplot as plt
@@ -281,6 +289,64 @@ def predict_logits_with_dataloader(
 
 
 # =========================
+# 曲線プロット（loss/metrics）
+# =========================
+def plot_curve_loss(history: List[Dict[str, Any]], out_path: str) -> None:
+    """
+    history item例:
+      {"step": int, "train_loss": float|None, "eval_loss": float|None}
+    """
+    steps = [h["step"] for h in history]
+    train_loss = [h.get("train_loss", None) for h in history]
+    eval_loss = [h.get("eval_loss", None) for h in history]
+
+    plt.figure(figsize=(9, 5))
+    if any(v is not None for v in train_loss):
+        xs = [s for s, v in zip(steps, train_loss) if v is not None]
+        ys = [v for v in train_loss if v is not None]
+        plt.plot(xs, ys, label="train_loss")
+    if any(v is not None for v in eval_loss):
+        xs = [s for s, v in zip(steps, eval_loss) if v is not None]
+        ys = [v for v in eval_loss if v is not None]
+        plt.plot(xs, ys, label="eval_loss")
+
+    plt.xlabel("step")
+    plt.ylabel("loss")
+    plt.title("Loss Curve")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=220)
+    plt.close()
+
+
+def plot_curve_eval_metrics(history: List[Dict[str, Any]], out_path: str) -> None:
+    """
+    history item例:
+      {"step": int, "eval_mcc": float|None, "eval_f1": float|None, "eval_acc": float|None, "eval_thr": float|None}
+    """
+    steps = [h["step"] for h in history]
+
+    def _series(key):
+        xs = [s for s, h in zip(steps, history) if h.get(key, None) is not None]
+        ys = [h[key] for h in history if h.get(key, None) is not None]
+        return xs, ys
+
+    plt.figure(figsize=(9, 5))
+    for key in ["eval_mcc", "eval_f1", "eval_acc"]:
+        xs, ys = _series(key)
+        if len(xs) > 0:
+            plt.plot(xs, ys, label=key)
+
+    plt.xlabel("step")
+    plt.ylabel("score")
+    plt.title("Eval Metrics Curve (threshold-optimized on eval)")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=220)
+    plt.close()
+
+
+# =========================
 # LoRA（任意、studentのみ）
 # =========================
 def maybe_apply_lora_to_student(
@@ -397,6 +463,105 @@ class DistillTrainer(Trainer):
         loss = (1.0 - a) * loss_ce + a * loss_kd + b * loss_rep
 
         return (loss, out_s) if return_outputs else loss
+
+
+# =========================
+# 曲線出力Callback（studentの最終学習で使用）
+# =========================
+class CurveLoggerCallback(TrainerCallback):
+    """
+    - on_log: train_loss を拾う
+    - on_evaluate: eval_loss（Trainer側metrics） + 自前推論によるeval_mcc/f1/acc（閾値最適化）を記録
+    - train_end: curve_loss.png / curve_eval_metrics.png を保存
+
+    注意:
+    - 自前推論は重いが、eval_steps間隔なので許容とする。
+    """
+
+    def __init__(
+        self,
+        tokenizer,
+        eval_dataset: Dataset,
+        out_dir: str,
+        amp: str,
+        batch_size: int,
+        threshold_grid: int,
+        prior_adjust: float,
+        prior_tau: float,
+        prefix: str = "",
+    ):
+        self.tokenizer = tokenizer
+        self.eval_dataset = eval_dataset
+        self.out_dir = out_dir
+        self.amp = amp
+        self.batch_size = batch_size
+        self.threshold_grid = threshold_grid
+        self.prior_adjust = float(prior_adjust)
+        self.prior_tau = float(prior_tau)
+        self.prefix = prefix
+
+        self.history: List[Dict[str, Any]] = []
+        self._last_step = 0
+
+        os.makedirs(self.out_dir, exist_ok=True)
+
+    def _ensure_row(self, step: int) -> Dict[str, Any]:
+        # 同stepの行があればそれを返す、なければ追加
+        for h in reversed(self.history):
+            if h.get("step") == step:
+                return h
+        row = {"step": int(step)}
+        self.history.append(row)
+        return row
+
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        if not logs:
+            return
+        step = int(state.global_step)
+        self._last_step = step
+        row = self._ensure_row(step)
+        if "loss" in logs and logs["loss"] is not None:
+            row["train_loss"] = float(logs["loss"])
+
+    def on_evaluate(self, args, state, control, metrics=None, model=None, **kwargs):
+        step = int(state.global_step)
+        self._last_step = step
+        row = self._ensure_row(step)
+
+        if metrics and "eval_loss" in metrics and metrics["eval_loss"] is not None:
+            row["eval_loss"] = float(metrics["eval_loss"])
+
+        # 自前推論で eval metrics（閾値最適化）を算出
+        if model is None:
+            return
+        logits, labels = predict_logits_with_dataloader(
+            model=model,
+            dataset=self.eval_dataset,
+            tokenizer=self.tokenizer,
+            batch_size=max(8, int(self.batch_size)),
+            amp=self.amp,
+        )
+        logits_t = torch.tensor(logits, dtype=torch.float32)
+        logits_adj = apply_logit_adjustment(logits_t, self.prior_adjust, self.prior_tau).numpy()
+        prob1 = logits_to_prob1(logits_adj)
+
+        best = sweep_threshold_best_mcc(prob1, labels, n_grid=int(self.threshold_grid))
+        row["eval_mcc"] = float(best["mcc"])
+        row["eval_f1"] = float(best["f1"])
+        row["eval_acc"] = float(best["acc"])
+        row["eval_thr"] = float(best["thr"])
+
+    def on_train_end(self, args, state, control, **kwargs):
+        # history保存
+        hist_path = os.path.join(self.out_dir, f"{self.prefix}curve_history.json")
+        with open(hist_path, "w", encoding="utf-8") as f:
+            json.dump(self.history, f, indent=2, ensure_ascii=False)
+
+        # 図保存（要求: curve_loss.png, curve_eval_metrics.png）
+        loss_path = os.path.join(self.out_dir, f"{self.prefix}curve_loss.png")
+        eval_path = os.path.join(self.out_dir, f"{self.prefix}curve_eval_metrics.png")
+        plot_curve_loss(self.history, loss_path)
+        plot_curve_eval_metrics(self.history, eval_path)
 
 
 # =========================
@@ -581,6 +746,8 @@ def train_student_distill(
     trial_params: Dict[str, Any],
     prior_adjust: float,
     save_model: bool,
+    curve_out_dir: Optional[str] = None,   # ★追加: curve出力先（Noneなら出さない）
+    curve_prefix: str = "",                # ★追加: 出力ファイル名prefix（通常は""）
 ) -> Tuple[AutoModelForSequenceClassification, Dict[str, float], np.ndarray, np.ndarray]:
     max_length = int(trial_params.get("max_length", args.max_length))
 
@@ -689,6 +856,22 @@ def train_student_distill(
         prior_tau=prior_tau,
     )
 
+    # ★追加: curve出力（最終学習時だけon）
+    if curve_out_dir is not None:
+        trainer.add_callback(
+            CurveLoggerCallback(
+                tokenizer=tokenizer,
+                eval_dataset=ds_va,
+                out_dir=curve_out_dir,
+                amp=args.amp,
+                batch_size=int(trial_params.get("batch_size", args.batch_size)),
+                threshold_grid=int(args.threshold_grid),
+                prior_adjust=prior_adjust,
+                prior_tau=prior_tau,
+                prefix=curve_prefix,
+            )
+        )
+
     trainer.train()
     eval_metrics = trainer.evaluate()
 
@@ -768,6 +951,7 @@ def kfold_oof_train_eval(
             trial_params=trial_params,
             prior_adjust=prior_adjust,
             save_model=save_models,
+            curve_out_dir=None,    # kfold中はcurveは出さない（重い/不要）
         )
 
         best_fold = sweep_threshold_best_mcc(val_prob1, val_labels, n_grid=args.threshold_grid)
@@ -934,19 +1118,23 @@ def final_train_and_test(
         save_model=True,
     )
 
+    # ★ここでcurveをfinal配下に出す
+    student_work_dir = os.path.join(out_dir, "student_final_work")
     _, student_eval, _, _ = train_student_distill(
         args=args,
         tokenizer=tokenizer,
         teacher_model=teacher_model,
         train_df=tv_train,
         val_df=tv_val,
-        output_dir=os.path.join(out_dir, "student_final_work"),
+        output_dir=student_work_dir,
         trial_params=trial_params,
         prior_adjust=prior_adjust,
         save_model=True,
+        curve_out_dir=out_dir,    # <- curve_loss.png / curve_eval_metrics.png をここに出す
+        curve_prefix="",          # 要求通りファイル名は固定
     )
 
-    src_student = os.path.join(out_dir, "student_final_work", "student_model")
+    src_student = os.path.join(student_work_dir, "student_model")
     if not os.path.isdir(src_student):
         raise RuntimeError(f"studentモデルが見つからない: {src_student}")
     shutil.rmtree(student_dir, ignore_errors=True)
