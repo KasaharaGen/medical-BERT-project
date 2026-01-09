@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-fine_tuning.py (refactored)
+fine_tuning.py (refactored + padding bugfix)
 
 必須条件:
 - 混同行列を青(Blues)に統一し、セル内を%表記で出力する
@@ -13,16 +13,10 @@ fine_tuning.py (refactored)
 - Teacherを強くする（各foldでTeacherを教師ありFT→そのTeacherでStudent蒸留）
 - 分割を1回固定から「Stratified K-fold」にする
 
-設計:
-- testは最初に固定分割（stratified）
-- train+val部分に対してStratifiedKFoldでOOF評価を作り、OOFでbest thresholdを決める
-- best thresholdを固定してtest評価する（閾値リーク回避）
-- Optunaを使う場合、fold平均MCCを最大化（評価はOOF上の閾値最適化MCC）
-- ENOSPC/破損対策: Optuna探索中はモデル保存しない
-
-依存:
-- transformers, datasets, sklearn, optuna, matplotlib
-- LoRAはpeftがあればstudentに適用可能（teacherには適用しない）
+重要バグ修正:
+- ValueError: expected sequence of length ... は paddingが効いていないことが主因
+- datasets.Dataset に set_format(type="torch") すると環境/版差で collator がpadできず stackして落ちる例がある
+- tokenize_dataset() から set_format を削除し、DataCollatorWithPaddingにpadding責務を一任する
 
 実行例:
 python fine_tuning.py \
@@ -42,7 +36,6 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 import json
 import math
-import time
 import random
 import shutil
 import argparse
@@ -138,6 +131,10 @@ def tokenize_dataset(
     tokenizer,
     max_length: int,
 ) -> Dataset:
+    """
+    重要: set_format(type="torch") をしない。
+    DataCollatorWithPadding が可変長をpadする責務を負う。
+    """
     ds = Dataset.from_pandas(df.reset_index(drop=True))
 
     def _tok_map(batch):
@@ -145,7 +142,7 @@ def tokenize_dataset(
 
     ds = ds.map(_tok_map, batched=True, remove_columns=["text"])
     ds = ds.rename_column("label", "labels")
-    ds.set_format(type="torch", columns=["input_ids", "attention_mask", "labels"])
+    # ここで set_format しない（padding bugfix）
     return ds
 
 
@@ -157,11 +154,6 @@ def build_class_weight(
     power: float = 1.0,
     clip_max: float = 1e9,
 ) -> Optional[torch.Tensor]:
-    """
-    標準的なbalanced weight:
-      w0 = N/(2*neg), w1 = N/(2*pos)
-    それを power で緩和し、clip_maxで上限クリップする。
-    """
     pos = int(train_labels.sum())
     neg = int(len(train_labels) - pos)
     if pos == 0 or neg == 0:
@@ -170,11 +162,9 @@ def build_class_weight(
     w0 = len(train_labels) / (2.0 * neg)
     w1 = len(train_labels) / (2.0 * pos)
 
-    # 緩和: sqrtならpower=0.5
     w0 = float(w0) ** float(power)
     w1 = float(w1) ** float(power)
 
-    # クリップ
     w0 = min(w0, clip_max)
     w1 = min(w1, clip_max)
 
@@ -185,20 +175,12 @@ def build_class_weight(
 # Logit Adjustment / Prior補正
 # =========================
 def compute_prior_logit_adjustment(train_labels: np.ndarray) -> float:
-    """
-    prior補正項: log((1-pi)/pi)
-    piはtrain陽性率。極端値はクリップ。
-    """
     pi = float(np.mean(train_labels))
     pi = min(max(pi, 1e-6), 1.0 - 1e-6)
     return float(math.log((1.0 - pi) / pi))
 
 
 def apply_logit_adjustment(logits: torch.Tensor, adjust: float, tau: float) -> torch.Tensor:
-    """
-    logits: [B,2]
-    logits[:,1] -= tau * adjust
-    """
     if tau == 0.0:
         return logits
     out = logits.clone()
@@ -215,13 +197,7 @@ def sweep_threshold_best_mcc(
     n_grid: int = 401,
 ) -> Dict[str, Any]:
     thresholds = np.linspace(0.0, 1.0, n_grid)
-    best = {
-        "thr": 0.5,
-        "mcc": -1.0,
-        "f1": 0.0,
-        "acc": 0.0,
-        "cm": None,
-    }
+    best = {"thr": 0.5, "mcc": -1.0, "f1": 0.0, "acc": 0.0, "cm": None}
 
     for thr in thresholds:
         preds = (prob1 >= thr).astype(int)
@@ -284,7 +260,6 @@ def maybe_apply_lora_to_student(
 
 
 def force_classifier_trainable(model: nn.Module) -> None:
-    # LoRA適用後でもclassifierはfull update
     for name, p in model.named_parameters():
         if "classifier" in name:
             p.requires_grad = True
@@ -294,12 +269,6 @@ def force_classifier_trainable(model: nn.Module) -> None:
 # 蒸留Trainer（logits KD + 表現蒸留 + prior補正 + クラス重み）
 # =========================
 class DistillTrainer(Trainer):
-    """
-    loss = (1-alpha)*CE + alpha*T^2*KL(teacher||student) + beta*MSE(CLS_teacher, CLS_student)
-
-    - CEとKDは（任意で）logit adjustment後のlogitsで計算
-    - 表現蒸留は最後層CLSのMSE
-    """
     def __init__(
         self,
         teacher_model: nn.Module,
@@ -337,7 +306,6 @@ class DistillTrainer(Trainer):
         logits_s = out_s.logits
         device = logits_s.device
 
-        # teacher device sync
         t_dev = next(self.teacher_model.parameters()).device
         if t_dev != device:
             self.teacher_model.to(device)
@@ -349,24 +317,19 @@ class DistillTrainer(Trainer):
             out_t = self.teacher_model(**model_inputs, output_hidden_states=True)
             logits_t = out_t.logits
 
-        # prior補正（強力）
         logits_s_adj = apply_logit_adjustment(logits_s, self.prior_adjust, self.prior_tau)
         logits_t_adj = apply_logit_adjustment(logits_t, self.prior_adjust, self.prior_tau)
 
-        # CE（class weight緩和済みを使用）
         weight = self.class_weight.to(device) if self.class_weight is not None else None
         ce = nn.CrossEntropyLoss(weight=weight, label_smoothing=self.label_smoothing)
         loss_ce = ce(logits_s_adj.view(-1, 2), labels.view(-1))
 
-        # KD (KL)
         T = self.temperature
         log_p_s = torch.log_softmax(logits_s_adj / T, dim=-1)
         p_t = torch.softmax(logits_t_adj / T, dim=-1)
         loss_kd = self.kl(log_p_s, p_t) * (T * T)
 
-        # 表現蒸留（最後層CLS）
-        # hidden_states: tuple(len=layers+1), each [B, L, H]
-        hs_s = out_s.hidden_states[-1][:, 0, :]  # CLS
+        hs_s = out_s.hidden_states[-1][:, 0, :]
         hs_t = out_t.hidden_states[-1][:, 0, :]
         loss_rep = self.mse(hs_s, hs_t)
 
@@ -387,11 +350,6 @@ def plot_confusion_matrix_percent_blues(
     percent_mode: str = "all",
     fontsize: int = 18,
 ) -> None:
-    """
-    percent_mode:
-      - "all": 全サンプルに対する比率(%)
-      - "true": 行正規化（Trueラベルごとの%）
-    """
     cm = np.array(cm, dtype=float)
     if percent_mode == "true":
         row_sum = cm.sum(axis=1, keepdims=True)
@@ -410,7 +368,6 @@ def plot_confusion_matrix_percent_blues(
     plt.xticks(tick_marks, ["Pred_0", "Pred_1"])
     plt.yticks(tick_marks, ["True_0", "True_1"])
 
-    # %表示のみ（必須条件）
     thresh = cm_pct.max() / 2.0 if cm_pct.size > 0 else 0.0
     for i in range(2):
         for j in range(2):
@@ -441,14 +398,7 @@ def train_teacher_supervised(
     trial_params: Dict[str, Any],
     save_model: bool,
 ) -> Tuple[AutoModelForSequenceClassification, Dict[str, float]]:
-    """
-    Teacherを強くするため、foldごとに教師ありFTを行う。
-    - LoRAは使わない（teacherはfull FT）
-    - prior補正はteacher学習にも適用できるが、ここでは「無し」をデフォルトにし、student側で強く効かせる
-      （必要ならargs.teacher_use_prior_adjustでON可能）
-    """
     max_length = int(trial_params.get("max_length", args.max_length))
-
     ds_tr = tokenize_dataset(train_df, tokenizer, max_length=max_length)
     ds_va = tokenize_dataset(val_df, tokenizer, max_length=max_length)
 
@@ -461,7 +411,6 @@ def train_teacher_supervised(
             clip_max=float(trial_params.get("class_weight_clip", args.class_weight_clip)),
         )
 
-    # teacher config
     teacher_config = AutoConfig.from_pretrained(
         args.teacher_base_dir,
         num_labels=2,
@@ -470,7 +419,6 @@ def train_teacher_supervised(
         classifier_dropout=float(trial_params.get("teacher_classifier_dropout", args.teacher_classifier_dropout)),
         output_hidden_states=True,
     )
-
     teacher = AutoModelForSequenceClassification.from_pretrained(args.teacher_base_dir, config=teacher_config)
 
     collator = DataCollatorWithPadding(tokenizer, pad_to_multiple_of=8)
@@ -479,7 +427,6 @@ def train_teacher_supervised(
     fp16 = (amp == "fp16")
     bf16 = (amp == "bf16")
 
-    # 探索中は保存しない
     if save_model:
         save_strategy = "steps"
         load_best = True
@@ -519,9 +466,6 @@ def train_teacher_supervised(
         disable_tqdm=True,
     )
 
-    # teacherのCE loss（重み/label smoothing）
-    # Trainer標準lossにclass_weightを入れるにはcompute_loss overrideが必要なので、最小変更でteacherはweightなしでも走る。
-    # ただし強化目的ならweightも効くので、ここはTeacherTrainerを簡易実装する。
     class TeacherTrainer(Trainer):
         def __init__(self, class_weight=None, label_smoothing=0.0, *a, **kw):
             super().__init__(*a, **kw)
@@ -574,20 +518,11 @@ def train_student_distill(
     prior_adjust: float,
     save_model: bool,
 ) -> Tuple[AutoModelForSequenceClassification, Dict[str, float], np.ndarray, np.ndarray]:
-    """
-    戻り値:
-      - student model
-      - val上の評価（argmaxではなく、確率を返して後段でOOF閾値最適化）
-      - val_prob1（prior補正後logits→softmax）
-      - val_labels
-    """
     max_length = int(trial_params.get("max_length", args.max_length))
-
     ds_tr = tokenize_dataset(train_df, tokenizer, max_length=max_length)
     ds_va = tokenize_dataset(val_df, tokenizer, max_length=max_length)
 
     train_labels = train_df["label"].values
-
     cw = None
     if args.use_class_weight:
         cw = build_class_weight(
@@ -596,7 +531,6 @@ def train_student_distill(
             clip_max=float(trial_params.get("class_weight_clip", args.class_weight_clip)),
         )
 
-    # student config（表現蒸留のためhidden_statesを出す）
     student_config = AutoConfig.from_pretrained(
         args.student_model_dir,
         num_labels=2,
@@ -605,10 +539,8 @@ def train_student_distill(
         classifier_dropout=float(trial_params.get("classifier_dropout", args.classifier_dropout)),
         output_hidden_states=True,
     )
-
     student = AutoModelForSequenceClassification.from_pretrained(args.student_model_dir, config=student_config)
 
-    # LoRA（studentのみ）
     use_lora = bool(trial_params.get("use_lora", args.use_lora))
     student, lora_on = maybe_apply_lora_to_student(
         student,
@@ -668,13 +600,6 @@ def train_student_distill(
         disable_tqdm=True,
     )
 
-    distill_alpha = float(trial_params.get("distill_alpha", args.distill_alpha))
-    temperature = float(trial_params.get("temperature", args.temperature))
-    rep_beta = float(trial_params.get("rep_beta", args.rep_beta))
-    label_smoothing = float(trial_params.get("label_smoothing", args.label_smoothing))
-
-    prior_tau = float(trial_params.get("prior_tau", args.prior_tau))
-
     trainer = DistillTrainer(
         model=student,
         args=tr_args,
@@ -683,26 +608,24 @@ def train_student_distill(
         tokenizer=tokenizer,
         data_collator=collator,
         teacher_model=teacher_model,
-        distill_alpha=distill_alpha,
-        temperature=temperature,
-        rep_beta=rep_beta,
+        distill_alpha=float(trial_params.get("distill_alpha", args.distill_alpha)),
+        temperature=float(trial_params.get("temperature", args.temperature)),
+        rep_beta=float(trial_params.get("rep_beta", args.rep_beta)),
         class_weight=cw,
-        label_smoothing=label_smoothing,
+        label_smoothing=float(trial_params.get("label_smoothing", args.label_smoothing)),
         prior_adjust=prior_adjust,
-        prior_tau=prior_tau,
+        prior_tau=float(trial_params.get("prior_tau", args.prior_tau)),
     )
 
     trainer.train()
     eval_metrics = trainer.evaluate()
 
-    # val logitsを取得（prior補正後で確率化）
     preds = trainer.predict(ds_va)
     val_logits = preds.predictions
     val_labels = preds.label_ids
 
-    # prior補正後logitsでprobを作る
     val_logits_t = torch.tensor(val_logits, dtype=torch.float32)
-    val_logits_adj = apply_logit_adjustment(val_logits_t, prior_adjust, prior_tau).numpy()
+    val_logits_adj = apply_logit_adjustment(val_logits_t, prior_adjust, float(trial_params.get("prior_tau", args.prior_tau))).numpy()
     val_prob1 = logits_to_prob1(val_logits_adj)
 
     if save_model:
@@ -724,23 +647,8 @@ def kfold_oof_train_eval(
     save_models: bool,
     work_dir: str,
 ) -> Dict[str, Any]:
-    """
-    - 各foldでteacher強化→student蒸留
-    - valのprobをOOFとして集め、OOF全体で閾値最適化してbest_thrを決める
-    - objectiveとしてfold平均mcc（各foldのbest mcc）も返すが、最終thrはOOF統合で決定
-
-    戻り値:
-      {
-        "oof_best": {...},   # thr, mcc等（OOF全体の最適）
-        "fold_mean_mcc": float,
-        "fold_metrics": [...],
-        "best_threshold": float,
-        "prior_adjust": float,
-      }
-    """
     labels = df_trainval["label"].values
     skf = StratifiedKFold(n_splits=args.n_splits, shuffle=True, random_state=args.seed)
-
     prior_adjust = compute_prior_logit_adjustment(labels)
 
     oof_prob1 = np.zeros(len(df_trainval), dtype=float)
@@ -754,13 +662,8 @@ def kfold_oof_train_eval(
         val_df = df_trainval.iloc[va_idx].reset_index(drop=True)
 
         fold_dir = os.path.join(work_dir, f"fold_{fold:02d}")
-        if save_models:
-            ensure_empty_dir(fold_dir)
-        else:
-            # 探索中は軽量化（保存しない）。ただしTrainingArgumentsでoutput_dir必須なので作る
-            ensure_empty_dir(fold_dir)
+        ensure_empty_dir(fold_dir)
 
-        # teacher
         teacher_dir = os.path.join(fold_dir, "teacher")
         student_dir = os.path.join(fold_dir, "student")
         os.makedirs(teacher_dir, exist_ok=True)
@@ -776,7 +679,6 @@ def kfold_oof_train_eval(
             save_model=save_models,
         )
 
-        # student
         _, student_eval, val_prob1, val_labels = train_student_distill(
             args=args,
             tokenizer=tokenizer,
@@ -789,11 +691,9 @@ def kfold_oof_train_eval(
             save_model=save_models,
         )
 
-        # fold内でbest MCC（参考）
         best_fold = sweep_threshold_best_mcc(val_prob1, val_labels, n_grid=args.threshold_grid)
         fold_best_mccs.append(float(best_fold["mcc"]))
 
-        # oofへ格納
         oof_prob1[va_idx] = val_prob1
 
         fold_metrics.append({
@@ -809,11 +709,9 @@ def kfold_oof_train_eval(
             }
         })
 
-        # メモリ圧迫回避
         del teacher_model
         torch.cuda.empty_cache()
 
-    # OOF全体でthr最適化（最重要：これをtestに固定適用）
     oof_best = sweep_threshold_best_mcc(oof_prob1, oof_labels, n_grid=args.threshold_grid)
 
     return {
@@ -832,7 +730,7 @@ def kfold_oof_train_eval(
 
 
 # =========================
-# Final train（trainval全体でteacher→student）と Test評価（固定thr）
+# Final: test評価（固定thr、Blues%混同行列）
 # =========================
 @torch.no_grad()
 def evaluate_on_test_fixed_threshold(
@@ -860,7 +758,7 @@ def evaluate_on_test_fixed_threshold(
         ds_te,
         batch_size=args.batch_size,
         shuffle=False,
-        collate_fn=collator,
+        collate_fn=collator,  # 重要
         num_workers=4,
     )
 
@@ -897,19 +795,12 @@ def evaluate_on_test_fixed_threshold(
     os.makedirs(out_dir, exist_ok=True)
     with open(os.path.join(out_dir, "test_metrics_fixed_threshold.json"), "w", encoding="utf-8") as f:
         json.dump(
-            {
-                "fixed_threshold": float(fixed_thr),
-                "mcc": mcc,
-                "f1": f1,
-                "accuracy": acc,
-                "cm": cm.tolist(),
-            },
+            {"fixed_threshold": float(fixed_thr), "mcc": mcc, "f1": f1, "accuracy": acc, "cm": cm.tolist()},
             f,
             indent=2,
             ensure_ascii=False,
         )
 
-    # 混同行列（必須：Blues + %）
     plot_confusion_matrix_percent_blues(
         cm=cm,
         out_path=os.path.join(out_dir, "test_confusion_matrix_percent_blues.png"),
@@ -918,12 +809,10 @@ def evaluate_on_test_fixed_threshold(
         fontsize=20,
     )
 
-    # CSVも保存
     pd.DataFrame(cm, index=["True_0", "True_1"], columns=["Pred_0", "Pred_1"]).to_csv(
         os.path.join(out_dir, "test_confusion_matrix_counts.csv")
     )
 
-    # %表（数値も残したい場合）
     cm_pct = cm.astype(float)
     if args.cm_percent_mode == "true":
         rs = cm_pct.sum(axis=1, keepdims=True)
@@ -938,13 +827,7 @@ def evaluate_on_test_fixed_threshold(
         os.path.join(out_dir, "test_confusion_matrix_percent.csv")
     )
 
-    return {
-        "fixed_threshold": float(fixed_thr),
-        "mcc": mcc,
-        "f1": f1,
-        "accuracy": acc,
-        "cm": cm.tolist(),
-    }
+    return {"fixed_threshold": float(fixed_thr), "mcc": mcc, "f1": f1, "accuracy": acc, "cm": cm.tolist()}
 
 
 def final_train_and_test(
@@ -957,10 +840,6 @@ def final_train_and_test(
     prior_adjust: float,
     out_dir: str,
 ) -> Dict[str, Any]:
-    """
-    trainval全体で teacher強化 → student蒸留
-    その後、OOFで決めた閾値を固定してtest評価
-    """
     max_length = int(trial_params.get("max_length", args.max_length))
 
     ensure_empty_dir(out_dir)
@@ -971,8 +850,6 @@ def final_train_and_test(
     os.makedirs(student_dir, exist_ok=True)
     os.makedirs(tok_dir, exist_ok=True)
 
-    # teacher_finalは、trainval内で軽いvalを作る（学習安定のため）
-    # ※ここはテストに触れない。trainvalの中でさらにstratified split。
     tv_train, tv_val = train_test_split(
         df_trainval,
         test_size=min(0.1, args.val_ratio_for_final),
@@ -993,7 +870,6 @@ def final_train_and_test(
         save_model=True,
     )
 
-    # student_final
     _, student_eval, _, _ = train_student_distill(
         args=args,
         tokenizer=tokenizer,
@@ -1006,17 +882,14 @@ def final_train_and_test(
         save_model=True,
     )
 
-    # studentモデルは保存済み（student_final_work/student_model）なのでbest_modelへコピーして整形
     src_student = os.path.join(out_dir, "student_final_work", "student_model")
     if not os.path.isdir(src_student):
         raise RuntimeError(f"studentモデルが見つからない: {src_student}")
     shutil.rmtree(student_dir, ignore_errors=True)
     shutil.copytree(src_student, student_dir)
 
-    # tokenizer保存
     tokenizer.save_pretrained(tok_dir)
 
-    # 記録
     with open(os.path.join(out_dir, "final_train_params.json"), "w", encoding="utf-8") as f:
         json.dump(trial_params, f, indent=2, ensure_ascii=False)
     with open(os.path.join(out_dir, "final_teacher_eval.json"), "w", encoding="utf-8") as f:
@@ -1024,7 +897,6 @@ def final_train_and_test(
     with open(os.path.join(out_dir, "final_student_eval.json"), "w", encoding="utf-8") as f:
         json.dump(student_eval, f, indent=2, ensure_ascii=False)
 
-    # test（固定thr）
     test_metrics = evaluate_on_test_fixed_threshold(
         args=args,
         tokenizer=tokenizer,
@@ -1062,9 +934,7 @@ def run_optuna_kfold(args, df_trainval: pd.DataFrame, tokenizer) -> Dict[str, An
         pd.DataFrame(columns=["trial", "oof_mcc", "fold_mean_mcc", "best_thr", "params_json"]).to_csv(trials_log_path, index=False)
 
     def objective(trial: optuna.Trial) -> float:
-        # 探索空間（必要に応じて調整）
         params = {
-            # student最重要
             "lr": trial.suggest_float("lr", 5e-6, 3e-4, log=True),
             "weight_decay": trial.suggest_float("weight_decay", 0.0, 5e-2),
             "warmup_ratio": trial.suggest_float("warmup_ratio", 0.0, 0.15),
@@ -1077,19 +947,15 @@ def run_optuna_kfold(args, df_trainval: pd.DataFrame, tokenizer) -> Dict[str, An
             "max_length": args.max_length,
             "lr_scheduler_type": args.lr_scheduler_type,
 
-            # KD
             "distill_alpha": trial.suggest_float("distill_alpha", 0.15, 0.55),
             "temperature": trial.suggest_float("temperature", 1.5, 4.0),
-            "rep_beta": trial.suggest_float("rep_beta", 0.0, 2.0),  # 表現蒸留の強度
+            "rep_beta": trial.suggest_float("rep_beta", 0.0, 2.0),
 
-            # prior補正
             "prior_tau": trial.suggest_float("prior_tau", 0.0, 2.0),
 
-            # class weight緩和
             "class_weight_power": trial.suggest_float("class_weight_power", 0.3, 1.0),
             "class_weight_clip": trial.suggest_float("class_weight_clip", 1.5, 5.0),
 
-            # teacher強化（やりすぎると重いので範囲は控えめ）
             "teacher_lr": trial.suggest_float("teacher_lr", 5e-6, 5e-5, log=True),
             "teacher_weight_decay": trial.suggest_float("teacher_weight_decay", 0.0, 5e-2),
             "teacher_epochs": args.teacher_epochs,
@@ -1098,9 +964,9 @@ def run_optuna_kfold(args, df_trainval: pd.DataFrame, tokenizer) -> Dict[str, An
             "teacher_hidden_dropout_prob": trial.suggest_float("teacher_hidden_dropout_prob", 0.0, 0.2),
             "teacher_classifier_dropout": trial.suggest_float("teacher_classifier_dropout", 0.0, 0.3),
             "teacher_attention_dropout_prob": args.teacher_attention_dropout_prob,
+            "attention_probs_dropout_prob": args.attention_probs_dropout_prob,
         }
 
-        # LoRAはstudentのみ（固定ON/OFF）
         params["use_lora"] = bool(args.use_lora)
         params["lora_targets"] = args.lora_targets
         if params["use_lora"]:
@@ -1113,7 +979,6 @@ def run_optuna_kfold(args, df_trainval: pd.DataFrame, tokenizer) -> Dict[str, An
                 params["lora_alpha"] = trial.suggest_categorical("lora_alpha", [32, 64])
             params["lora_dropout"] = trial.suggest_float("lora_dropout", 0.0, 0.1)
 
-        # 作業dir（探索中は保存しないが、Trainerのoutput_dir用にtmpを使う）
         tmp_dir = os.path.join(args.study_dir, "_tmp_kfold")
         ensure_empty_dir(tmp_dir)
 
@@ -1130,7 +995,6 @@ def run_optuna_kfold(args, df_trainval: pd.DataFrame, tokenizer) -> Dict[str, An
         fold_mean_mcc = float(res["fold_mean_mcc"])
         best_thr = float(res["best_threshold"])
 
-        # pruning
         trial.report(oof_mcc, step=0)
         if trial.should_prune():
             raise optuna.TrialPruned()
@@ -1156,7 +1020,6 @@ def run_optuna_kfold(args, df_trainval: pd.DataFrame, tokenizer) -> Dict[str, An
         "best_params": dict(study.best_trial.params),
     }
 
-    # best_paramsには固定項が入らないので結合
     merged = {
         "epochs": args.epochs,
         "max_length": args.max_length,
@@ -1164,7 +1027,6 @@ def run_optuna_kfold(args, df_trainval: pd.DataFrame, tokenizer) -> Dict[str, An
         "teacher_epochs": args.teacher_epochs,
         "teacher_attention_dropout_prob": args.teacher_attention_dropout_prob,
         "attention_probs_dropout_prob": args.attention_probs_dropout_prob,
-
         "use_lora": bool(args.use_lora),
         "lora_targets": args.lora_targets,
     }
@@ -1182,26 +1044,21 @@ def run_optuna_kfold(args, df_trainval: pd.DataFrame, tokenizer) -> Dict[str, An
 def parse_args():
     p = argparse.ArgumentParser()
 
-    # model dirs
-    p.add_argument("--student_model_dir", type=str, required=True, help="student初期モデル（pretraining_bert_2の出力など）")
-    p.add_argument("--teacher_base_dir", type=str, required=True, help="teacher強化の初期モデル（通常studentと同じで良い）")
+    p.add_argument("--student_model_dir", type=str, required=True)
+    p.add_argument("--teacher_base_dir", type=str, required=True)
     p.add_argument("--tokenizer_dir", type=str, required=True)
 
-    # data
     p.add_argument("--csv", type=str, required=True)
     p.add_argument("--test_ratio", type=float, default=0.2)
 
-    # output
     p.add_argument("--output_dir", type=str, default="./result_distill_kfold")
     p.add_argument("--study_dir", type=str, default="./optuna_study")
 
-    # k-fold
     p.add_argument("--use_kfold", action="store_true", default=True)
     p.add_argument("--n_splits", type=int, default=5)
     p.add_argument("--threshold_grid", type=int, default=401)
-    p.add_argument("--val_ratio_for_final", type=float, default=0.1, help="final trainでteacher/student安定用にtrainvalから切るval比率（testとは独立）")
+    p.add_argument("--val_ratio_for_final", type=float, default=0.1)
 
-    # train defaults (student)
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--epochs", type=int, default=3)
     p.add_argument("--max_length", type=int, default=512)
@@ -1213,26 +1070,21 @@ def parse_args():
     p.add_argument("--warmup_ratio", type=float, default=0.1)
     p.add_argument("--lr_scheduler_type", type=str, default="cosine", choices=["linear", "cosine"])
 
-    # dropout (student)
     p.add_argument("--hidden_dropout_prob", type=float, default=0.1)
     p.add_argument("--attention_probs_dropout_prob", type=float, default=0.0)
     p.add_argument("--classifier_dropout", type=float, default=0.1)
 
-    # KD params
     p.add_argument("--distill_alpha", type=float, default=0.35)
     p.add_argument("--temperature", type=float, default=2.0)
-    p.add_argument("--rep_beta", type=float, default=0.5, help="表現蒸留（CLS MSE）の重み")
+    p.add_argument("--rep_beta", type=float, default=0.5)
 
-    # loss
     p.add_argument("--use_class_weight", action="store_true", default=True)
-    p.add_argument("--class_weight_power", type=float, default=0.5, help="0.5でsqrt緩和")
-    p.add_argument("--class_weight_clip", type=float, default=3.0, help="重み上限")
+    p.add_argument("--class_weight_power", type=float, default=0.5)
+    p.add_argument("--class_weight_clip", type=float, default=3.0)
     p.add_argument("--label_smoothing", type=float, default=0.05)
 
-    # prior/logit adjustment
-    p.add_argument("--prior_tau", type=float, default=1.0, help="0で無効。大きいほど補正強。")
+    p.add_argument("--prior_tau", type=float, default=1.0)
 
-    # teacher training (強化)
     p.add_argument("--teacher_epochs", type=int, default=3)
     p.add_argument("--teacher_lr", type=float, default=2e-5)
     p.add_argument("--teacher_weight_decay", type=float, default=3e-3)
@@ -1241,33 +1093,26 @@ def parse_args():
     p.add_argument("--teacher_classifier_dropout", type=float, default=0.1)
     p.add_argument("--teacher_attention_dropout_prob", type=float, default=0.0)
 
-    # AMP
     p.add_argument("--amp", type=str, default="fp16", choices=["none", "fp16", "bf16"])
 
-    # eval/log
     p.add_argument("--eval_steps", type=int, default=50)
     p.add_argument("--logging_steps", type=int, default=50)
 
-    # Confusion Matrix style
-    p.add_argument("--cm_percent_mode", type=str, default="all", choices=["all", "true"],
-                   help="all:全体比%, true:行正規化%")
+    p.add_argument("--cm_percent_mode", type=str, default="all", choices=["all", "true"])
 
-    # LoRA (student only)
     p.add_argument("--use_lora", action="store_true", default=False)
     p.add_argument("--lora_r", type=int, default=8)
     p.add_argument("--lora_alpha", type=int, default=16)
     p.add_argument("--lora_dropout", type=float, default=0.05)
     p.add_argument("--lora_targets", type=str, default="query,key,value,dense")
 
-    # optuna
     p.add_argument("--use_optuna", action="store_true", default=False)
     p.add_argument("--study_name", type=str, default="kd_seqcls_kfold")
     p.add_argument("--n_trials", type=int, default=20)
     p.add_argument("--n_startup_trials", type=int, default=5)
     p.add_argument("--use_pruner", action="store_true", default=True)
-    p.add_argument("--optuna_storage", type=str, default="", help="例: sqlite:////path/to/study.db（空ならin-memory）")
+    p.add_argument("--optuna_storage", type=str, default="")
 
-    # run mode
     p.add_argument("--final_train_best", action="store_true", default=True)
 
     return p.parse_args()
@@ -1292,16 +1137,13 @@ def main():
 
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_dir, use_fast=True)
 
-    # testは固定分割
     df = load_df(args.csv)
     df_trainval, df_test = stratified_test_split(df, test_ratio=args.test_ratio, seed=args.seed)
 
-    # Optuna or single run
     if args.use_optuna:
         best_info = run_optuna_kfold(args, df_trainval, tokenizer)
         trial_params = best_info["merged_best_params"]
     else:
-        # 手動params
         trial_params = {
             "lr": args.lr,
             "weight_decay": args.weight_decay,
@@ -1335,7 +1177,6 @@ def main():
             "lora_targets": args.lora_targets,
         }
 
-    # k-foldでOOF閾値を決める（最重要）
     kfold_dir = os.path.join(args.output_dir, "kfold_oof")
     ensure_empty_dir(kfold_dir)
 
@@ -1344,20 +1185,18 @@ def main():
         df_trainval=df_trainval,
         tokenizer=tokenizer,
         trial_params=trial_params,
-        save_models=False,  # ディスク節約（必要ならTrueにしてfoldモデル保存）
+        save_models=False,
         work_dir=kfold_dir,
     )
 
     best_thr = float(res["best_threshold"])
     prior_adjust = float(res["prior_adjust"])
 
-    # 記録
     with open(os.path.join(args.output_dir, "oof_result.json"), "w", encoding="utf-8") as f:
         json.dump(res, f, indent=2, ensure_ascii=False)
     with open(os.path.join(args.output_dir, "chosen_threshold.json"), "w", encoding="utf-8") as f:
         json.dump({"fixed_threshold": best_thr, "prior_adjust": prior_adjust}, f, indent=2, ensure_ascii=False)
 
-    # 最終学習 & テスト評価（固定thr）
     if args.final_train_best:
         final_dir = os.path.join(args.output_dir, "final")
         test_metrics = final_train_and_test(
@@ -1371,16 +1210,8 @@ def main():
             out_dir=final_dir,
         )
         with open(os.path.join(final_dir, "summary.json"), "w", encoding="utf-8") as f:
-            json.dump(
-                {
-                    "fixed_threshold": best_thr,
-                    "prior_adjust": prior_adjust,
-                    "test": test_metrics,
-                },
-                f,
-                indent=2,
-                ensure_ascii=False,
-            )
+            json.dump({"fixed_threshold": best_thr, "prior_adjust": prior_adjust, "test": test_metrics},
+                      f, indent=2, ensure_ascii=False)
 
     print("Done.")
 
