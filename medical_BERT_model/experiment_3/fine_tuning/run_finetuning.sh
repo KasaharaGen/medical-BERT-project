@@ -1,56 +1,85 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ENV_NAME="gen"
-PROJECT_ROOT="/home/gonken2020/gen/medical-BERT-project/medical_BERT_model/experiment_3/fine_tuning"
-PYTHON_BIN="$HOME/anaconda3/envs/${ENV_NAME}/bin/python"
+# ========= ユーザー環境に合わせて編集 =========
+PYTHON_BIN="${PYTHON_BIN:-python}"
+CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
-STUDENT_MODEL_DIR="/home/gonken2020/gen/medical-BERT-project/medical_BERT_model/experiment_3/pretraining_bert_2/pretraining_bert_best/best_model"
-TEACHER_BASE_DIR="${STUDENT_MODEL_DIR}"
-TOKENIZER_DIR="/home/gonken2020/gen/medical-BERT-project/medical_BERT_model/experiment_3/pretraining_bert_2/pretraining_bert_best/tokenizer"
+PROJECT_DIR="/home/gonken2020/gen/medical-BERT-project/medical_BERT_model/experiment_3/fine_tuning"
+SCRIPT="${PROJECT_DIR}/fine_tuning.py"
 
-CSV_PATH="/home/gonken2020/gen/medical-BERT-project/medical_BERT_model/experiment_3/data/learning_data.csv"
+# student（pretraining_bert_2 の出力）
+STUDENT_MODEL_DIR="/home/gonken2020/gen/medical-BERT-project/medical_BERT_model/experiment_3/pretraining_bert_2/pretrain_phase2_model"
 
-OUT_DIR="${PROJECT_ROOT}/result_kfold_kd_lora_single"
-STUDY_DIR="${OUT_DIR}/optuna_study"  # 使わないが引数上必要なので作る
+# teacher（強いモデルを推奨）
+TEACHER_BASE_DIR="/home/gonken2020/gen/medical-BERT-project/models/teacher_strong_model"
+
+# tokenizer（通常はstudentと同じ）
+TOKENIZER_DIR="${STUDENT_MODEL_DIR}"
+
+# 学習データ
+CSV_PATH="/home/gonken2020/gen/medical-BERT-project/data/chart_binary.csv"
+
+# 出力
+OUT_DIR="${PROJECT_DIR}/result_distill_kfold"
+STUDY_DIR="${PROJECT_DIR}/optuna_study"
+
+# ========= Optuna設定 =========
+# SQLite推奨（ENOSPC回避のため、十分空きがある場所へ）
+# 例: /home/gonken2020/gen/medical-BERT-project/optuna/optuna.db
+OPTUNA_DB="/home/gonken2020/gen/medical-BERT-project/optuna/optuna.db"
+STUDY_NAME="kd_seqcls_kfold"
+
+N_TRIALS=30
+N_STARTUP_TRIALS=8
+USE_PRUNER=1   # 1=有効, 0=無効
+
+# ========= 実行 =========
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}"
 
 mkdir -p "${OUT_DIR}" "${STUDY_DIR}"
-cd "${PROJECT_ROOT}"
+mkdir -p "$(dirname "${OPTUNA_DB}")"
 
-"${PYTHON_BIN}" fine_tuning.py \
+# --optuna_storage は空文字だとNone扱いの実装なので、必ず指定する
+# --use_pruner は flag なので、使うなら付ける／使わないなら付けない
+PRUNER_FLAG=()
+if [[ "${USE_PRUNER}" -eq 1 ]]; then
+  PRUNER_FLAG+=(--use_pruner)
+fi
+
+"${PYTHON_BIN}" -u "${SCRIPT}" \
   --student_model_dir "${STUDENT_MODEL_DIR}" \
-  --teacher_base_dir  "${TEACHER_BASE_DIR}" \
-  --tokenizer_dir     "${TOKENIZER_DIR}" \
-  --csv               "${CSV_PATH}" \
-  --output_dir        "${OUT_DIR}" \
-  --study_dir         "${STUDY_DIR}" \
-  --use_kfold \
-  --n_splits 5 \
+  --teacher_base_dir "${TEACHER_BASE_DIR}" \
+  --tokenizer_dir "${TOKENIZER_DIR}" \
+  --csv "${CSV_PATH}" \
+  --output_dir "${OUT_DIR}" \
+  --study_dir "${STUDY_DIR}" \
   --test_ratio 0.2 \
-  --final_train_best \
-  --max_length 512 \
-  --batch_size 8 \
-  --grad_accum 4 \
+  --n_splits 5 \
   --epochs 3 \
-  --teacher_epochs 2 \
-  --distill_alpha 0.35 \
-  --temperature 2.0 \
-  --rep_beta 0.5 \
-  --prior_tau 1.0 \
-  --class_weight_power 0.5 \
-  --class_weight_clip 3.0 \
-  --lr 5e-5 \
-  --weight_decay 0.01 \
-  --warmup_ratio 0.1 \
-  --label_smoothing 0.05 \
+  --teacher_epochs 3 \
+  --max_length 512 \
   --amp fp16 \
-  --cm_percent_mode all \
-  --use_lora \
-  --lora_targets "query,key,value,dense" \
-  --lora_r 8 \
-  --lora_alpha 16 \
-  --lora_dropout 0.05
+  --eval_steps 100 \
+  --logging_steps 50 \
+  --threshold_grid 401 \
+  --use_optuna \
+  --study_name "${STUDY_NAME}" \
+  --n_trials "${N_TRIALS}" \
+  --n_startup_trials "${N_STARTUP_TRIALS}" \
+  --optuna_storage "sqlite:///${OPTUNA_DB}" \
+  "${PRUNER_FLAG[@]}" \
+  --final_train_best
 
-echo "[INFO] Done. Outputs:"
-echo "  - Final test CM (Blues%): ${OUT_DIR}/final/test_confusion_matrix_percent_blues.png"
-echo "  - Test metrics (fixed thr): ${OUT_DIR}/final/test_metrics_fixed_threshold.json"
+echo "===================================================="
+echo "Optuna artifacts:"
+echo "  ${STUDY_DIR}/best_params.json"
+echo "  ${STUDY_DIR}/trials_log.csv"
+echo ""
+echo "Final artifacts:"
+echo "  ${OUT_DIR}/oof_result.json"
+echo "  ${OUT_DIR}/chosen_threshold.json"
+echo "  ${OUT_DIR}/final/curve_loss.png"
+echo "  ${OUT_DIR}/final/curve_eval_metrics.png"
+echo "  ${OUT_DIR}/final/test_confusion_matrix_percent_blues.png"
+echo "===================================================="
