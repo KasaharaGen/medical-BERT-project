@@ -2,33 +2,25 @@
 # -*- coding: utf-8 -*-
 
 """
-fine_tuning.py (refactored + padding bugfix)
+fine_tuning.py (refactored, robust predict fix)
 
-必須条件:
-- 混同行列を青(Blues)に統一し、セル内を%表記で出力する
-- Validationで閾値最適化した上で「テストは固定閾値」にする
+追加修正（今回のエラー対応）:
+- Trainer.predict(ds_va) を使わず、DataLoader + DataCollatorWithPadding で logits を自前で収集する
+  -> preds.predictions が ragged（例: 702と13が混在）になる問題を根絶する
+
+要求仕様:
+- 混同行列: Blues に統一 + セル内は%表記（all or true）
+- Validation(OOF)で閾値最適化 -> Testは固定閾値で評価
 - Logit Adjustment / Prior補正
-- クラス重みの弱め方を変える（power/clip）
-- 蒸留の“出力”だけでなく“表現”も蒸留する（CLS表現MSE）
-- Teacherを強くする（各foldでTeacherを教師ありFT→そのTeacherでStudent蒸留）
-- 分割を1回固定から「Stratified K-fold」にする
+- クラス重みの緩和（power/clip）
+- 表現蒸留（CLS MSE）
+- Teacher強化（foldごとにTeacher教師ありFT -> そのTeacherでStudent蒸留）
+- Stratified K-fold（testは固定分割、trainvalはK-fold）
+- GPU 1枚前提（DDPなし）
 
-重要バグ修正:
-- ValueError: expected sequence of length ... は paddingが効いていないことが主因
-- datasets.Dataset に set_format(type="torch") すると環境/版差で collator がpadできず stackして落ちる例がある
-- tokenize_dataset() から set_format を削除し、DataCollatorWithPaddingにpadding責務を一任する
-
-実行例:
-python fine_tuning.py \
-  --student_model_dir /path/to/student \
-  --teacher_base_dir  /path/to/teacher_base \
-  --tokenizer_dir     /path/to/tokenizer \
-  --csv /path/to/data.csv \
-  --output_dir ./result_distill_kfold \
-  --use_kfold --n_splits 5 \
-  --use_optuna --n_trials 20 \
-  --final_train_best \
-  --use_lora
+依存:
+- transformers, datasets, sklearn, optuna, matplotlib
+- LoRAはpeftがあればstudentに適用可能（teacherには適用しない）
 """
 
 import os
@@ -133,7 +125,7 @@ def tokenize_dataset(
 ) -> Dataset:
     """
     重要: set_format(type="torch") をしない。
-    DataCollatorWithPadding が可変長をpadする責務を負う。
+    DataCollatorWithPaddingにpadを任せる。
     """
     ds = Dataset.from_pandas(df.reset_index(drop=True))
 
@@ -142,7 +134,6 @@ def tokenize_dataset(
 
     ds = ds.map(_tok_map, batched=True, remove_columns=["text"])
     ds = ds.rename_column("label", "labels")
-    # ここで set_format しない（padding bugfix）
     return ds
 
 
@@ -181,6 +172,10 @@ def compute_prior_logit_adjustment(train_labels: np.ndarray) -> float:
 
 
 def apply_logit_adjustment(logits: torch.Tensor, adjust: float, tau: float) -> torch.Tensor:
+    """
+    logits: [B,2]
+    logits[:,1] -= tau * adjust
+    """
     if tau == 0.0:
         return logits
     out = logits.clone()
@@ -213,11 +208,14 @@ def sweep_threshold_best_mcc(
 
     if best["cm"] is None:
         preds = (prob1 >= 0.5).astype(int)
-        mcc = matthews_corrcoef(labels, preds) if len(np.unique(preds)) > 1 else 0.0
-        best["mcc"] = float(mcc)
         best["thr"] = 0.5
-        best["f1"] = float(f1_score(labels, preds)) if len(np.unique(preds)) > 1 else 0.0
         best["acc"] = float(accuracy_score(labels, preds))
+        if len(np.unique(preds)) > 1:
+            best["mcc"] = float(matthews_corrcoef(labels, preds))
+            best["f1"] = float(f1_score(labels, preds))
+        else:
+            best["mcc"] = 0.0
+            best["f1"] = 0.0
         best["cm"] = confusion_matrix(labels, preds, labels=[0, 1])
 
     return best
@@ -227,6 +225,59 @@ def logits_to_prob1(logits_np: np.ndarray) -> np.ndarray:
     logits_t = torch.tensor(logits_np, dtype=torch.float32)
     prob1 = torch.softmax(logits_t, dim=-1)[:, 1].cpu().numpy()
     return prob1
+
+
+# =========================
+# 推論（ragged回避のため自前）
+# =========================
+@torch.no_grad()
+def predict_logits_with_dataloader(
+    model: nn.Module,
+    dataset: Dataset,
+    tokenizer,
+    batch_size: int,
+    amp: str = "fp16",
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    logitsを必ず [N,2] で返す。
+    Trainer.predict由来のragged predictions問題を回避する。
+    """
+    from torch.utils.data import DataLoader
+
+    collator = DataCollatorWithPadding(tokenizer, pad_to_multiple_of=8)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model.eval()
+    model.to(device)
+
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=collator,
+        num_workers=4,
+    )
+
+    use_amp = torch.cuda.is_available() and (amp in ["fp16", "bf16"])
+    autocast_dtype = torch.float16 if amp == "fp16" else (torch.bfloat16 if amp == "bf16" else None)
+
+    all_logits: List[np.ndarray] = []
+    all_labels: List[np.ndarray] = []
+
+    with torch.cuda.amp.autocast(enabled=use_amp, dtype=autocast_dtype):
+        for batch in loader:
+            input_ids = batch["input_ids"].to(device, non_blocking=True)
+            attention_mask = batch["attention_mask"].to(device, non_blocking=True)
+            labels = batch["labels"].cpu().numpy()
+
+            out = model(input_ids=input_ids, attention_mask=attention_mask)
+            logits = out.logits.detach().cpu().numpy()
+
+            all_logits.append(logits)
+            all_labels.append(labels)
+
+    logits = np.concatenate(all_logits, axis=0)
+    labels = np.concatenate(all_labels, axis=0)
+    return logits, labels
 
 
 # =========================
@@ -269,6 +320,9 @@ def force_classifier_trainable(model: nn.Module) -> None:
 # 蒸留Trainer（logits KD + 表現蒸留 + prior補正 + クラス重み）
 # =========================
 class DistillTrainer(Trainer):
+    """
+    loss = (1-alpha)*CE + alpha*T^2*KL(teacher||student) + beta*MSE(CLS_teacher, CLS_student)
+    """
     def __init__(
         self,
         teacher_model: nn.Module,
@@ -306,6 +360,7 @@ class DistillTrainer(Trainer):
         logits_s = out_s.logits
         device = logits_s.device
 
+        # teacherをstudentと同deviceへ
         t_dev = next(self.teacher_model.parameters()).device
         if t_dev != device:
             self.teacher_model.to(device)
@@ -317,18 +372,22 @@ class DistillTrainer(Trainer):
             out_t = self.teacher_model(**model_inputs, output_hidden_states=True)
             logits_t = out_t.logits
 
+        # prior補正
         logits_s_adj = apply_logit_adjustment(logits_s, self.prior_adjust, self.prior_tau)
         logits_t_adj = apply_logit_adjustment(logits_t, self.prior_adjust, self.prior_tau)
 
+        # CE
         weight = self.class_weight.to(device) if self.class_weight is not None else None
         ce = nn.CrossEntropyLoss(weight=weight, label_smoothing=self.label_smoothing)
         loss_ce = ce(logits_s_adj.view(-1, 2), labels.view(-1))
 
+        # KD
         T = self.temperature
         log_p_s = torch.log_softmax(logits_s_adj / T, dim=-1)
         p_t = torch.softmax(logits_t_adj / T, dim=-1)
         loss_kd = self.kl(log_p_s, p_t) * (T * T)
 
+        # 表現蒸留（最後層CLS）
         hs_s = out_s.hidden_states[-1][:, 0, :]
         hs_t = out_t.hidden_states[-1][:, 0, :]
         loss_rep = self.mse(hs_s, hs_t)
@@ -350,6 +409,11 @@ def plot_confusion_matrix_percent_blues(
     percent_mode: str = "all",
     fontsize: int = 18,
 ) -> None:
+    """
+    percent_mode:
+      - "all": 全サンプルに対する比率(%)
+      - "true": 行正規化（Trueラベルごとの%）
+    """
     cm = np.array(cm, dtype=float)
     if percent_mode == "true":
         row_sum = cm.sum(axis=1, keepdims=True)
@@ -419,8 +483,8 @@ def train_teacher_supervised(
         classifier_dropout=float(trial_params.get("teacher_classifier_dropout", args.teacher_classifier_dropout)),
         output_hidden_states=True,
     )
-    teacher = AutoModelForSequenceClassification.from_pretrained(args.teacher_base_dir, config=teacher_config)
 
+    teacher = AutoModelForSequenceClassification.from_pretrained(args.teacher_base_dir, config=teacher_config)
     collator = DataCollatorWithPadding(tokenizer, pad_to_multiple_of=8)
 
     amp = args.amp
@@ -519,6 +583,7 @@ def train_student_distill(
     save_model: bool,
 ) -> Tuple[AutoModelForSequenceClassification, Dict[str, float], np.ndarray, np.ndarray]:
     max_length = int(trial_params.get("max_length", args.max_length))
+
     ds_tr = tokenize_dataset(train_df, tokenizer, max_length=max_length)
     ds_va = tokenize_dataset(val_df, tokenizer, max_length=max_length)
 
@@ -539,6 +604,7 @@ def train_student_distill(
         classifier_dropout=float(trial_params.get("classifier_dropout", args.classifier_dropout)),
         output_hidden_states=True,
     )
+
     student = AutoModelForSequenceClassification.from_pretrained(args.student_model_dir, config=student_config)
 
     use_lora = bool(trial_params.get("use_lora", args.use_lora))
@@ -600,6 +666,12 @@ def train_student_distill(
         disable_tqdm=True,
     )
 
+    distill_alpha = float(trial_params.get("distill_alpha", args.distill_alpha))
+    temperature = float(trial_params.get("temperature", args.temperature))
+    rep_beta = float(trial_params.get("rep_beta", args.rep_beta))
+    label_smoothing = float(trial_params.get("label_smoothing", args.label_smoothing))
+    prior_tau = float(trial_params.get("prior_tau", args.prior_tau))
+
     trainer = DistillTrainer(
         model=student,
         args=tr_args,
@@ -608,24 +680,30 @@ def train_student_distill(
         tokenizer=tokenizer,
         data_collator=collator,
         teacher_model=teacher_model,
-        distill_alpha=float(trial_params.get("distill_alpha", args.distill_alpha)),
-        temperature=float(trial_params.get("temperature", args.temperature)),
-        rep_beta=float(trial_params.get("rep_beta", args.rep_beta)),
+        distill_alpha=distill_alpha,
+        temperature=temperature,
+        rep_beta=rep_beta,
         class_weight=cw,
-        label_smoothing=float(trial_params.get("label_smoothing", args.label_smoothing)),
+        label_smoothing=label_smoothing,
         prior_adjust=prior_adjust,
-        prior_tau=float(trial_params.get("prior_tau", args.prior_tau)),
+        prior_tau=prior_tau,
     )
 
     trainer.train()
     eval_metrics = trainer.evaluate()
 
-    preds = trainer.predict(ds_va)
-    val_logits = preds.predictions
-    val_labels = preds.label_ids
+    # ★重要: Trainer.predictはraggedになることがあるので使わない
+    val_logits, val_labels = predict_logits_with_dataloader(
+        model=trainer.model,
+        dataset=ds_va,
+        tokenizer=tokenizer,
+        batch_size=max(8, int(trial_params.get("batch_size", args.batch_size))),
+        amp=args.amp,
+    )
 
+    # prior補正後logitsでprobを作る
     val_logits_t = torch.tensor(val_logits, dtype=torch.float32)
-    val_logits_adj = apply_logit_adjustment(val_logits_t, prior_adjust, float(trial_params.get("prior_tau", args.prior_tau))).numpy()
+    val_logits_adj = apply_logit_adjustment(val_logits_t, prior_adjust, prior_tau).numpy()
     val_prob1 = logits_to_prob1(val_logits_adj)
 
     if save_model:
@@ -649,6 +727,7 @@ def kfold_oof_train_eval(
 ) -> Dict[str, Any]:
     labels = df_trainval["label"].values
     skf = StratifiedKFold(n_splits=args.n_splits, shuffle=True, random_state=args.seed)
+
     prior_adjust = compute_prior_logit_adjustment(labels)
 
     oof_prob1 = np.zeros(len(df_trainval), dtype=float)
@@ -712,6 +791,7 @@ def kfold_oof_train_eval(
         del teacher_model
         torch.cuda.empty_cache()
 
+    # OOF全体でthr最適化（これをtestに固定適用）
     oof_best = sweep_threshold_best_mcc(oof_prob1, oof_labels, n_grid=args.threshold_grid)
 
     return {
@@ -730,7 +810,7 @@ def kfold_oof_train_eval(
 
 
 # =========================
-# Final: test評価（固定thr、Blues%混同行列）
+# Final: test評価（固定thr）
 # =========================
 @torch.no_grad()
 def evaluate_on_test_fixed_threshold(
@@ -748,43 +828,20 @@ def evaluate_on_test_fixed_threshold(
 
     model = AutoModelForSequenceClassification.from_pretrained(student_model_dir)
     model.eval()
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    model.to(device)
 
-    collator = DataCollatorWithPadding(tokenizer, pad_to_multiple_of=8)
-    from torch.utils.data import DataLoader
-
-    loader = DataLoader(
-        ds_te,
+    # logitsを自前で収集（[N,2]保証）
+    logits, labels = predict_logits_with_dataloader(
+        model=model,
+        dataset=ds_te,
+        tokenizer=tokenizer,
         batch_size=args.batch_size,
-        shuffle=False,
-        collate_fn=collator,  # 重要
-        num_workers=4,
+        amp=args.amp,
     )
 
-    all_logits = []
-    all_labels = []
+    logits_t = torch.tensor(logits, dtype=torch.float32)
+    logits_adj = apply_logit_adjustment(logits_t, prior_adjust, prior_tau).numpy()
 
-    amp = args.amp
-    use_amp = torch.cuda.is_available() and (amp in ["fp16", "bf16"])
-    autocast_dtype = torch.float16 if amp == "fp16" else (torch.bfloat16 if amp == "bf16" else None)
-
-    with torch.cuda.amp.autocast(enabled=use_amp, dtype=autocast_dtype):
-        for batch in loader:
-            input_ids = batch["input_ids"].to(device, non_blocking=True)
-            attention_mask = batch["attention_mask"].to(device, non_blocking=True)
-            labels = batch["labels"].cpu().numpy()
-
-            logits = model(input_ids=input_ids, attention_mask=attention_mask).logits.detach().cpu()
-            logits = apply_logit_adjustment(logits, prior_adjust, prior_tau).numpy()
-
-            all_logits.append(logits)
-            all_labels.append(labels)
-
-    logits = np.concatenate(all_logits, axis=0)
-    labels = np.concatenate(all_labels, axis=0)
-
-    prob1 = logits_to_prob1(logits)
+    prob1 = logits_to_prob1(logits_adj)
     preds = (prob1 >= fixed_thr).astype(int)
 
     mcc = float(matthews_corrcoef(labels, preds)) if len(np.unique(preds)) > 1 else 0.0
@@ -795,7 +852,13 @@ def evaluate_on_test_fixed_threshold(
     os.makedirs(out_dir, exist_ok=True)
     with open(os.path.join(out_dir, "test_metrics_fixed_threshold.json"), "w", encoding="utf-8") as f:
         json.dump(
-            {"fixed_threshold": float(fixed_thr), "mcc": mcc, "f1": f1, "accuracy": acc, "cm": cm.tolist()},
+            {
+                "fixed_threshold": float(fixed_thr),
+                "mcc": mcc,
+                "f1": f1,
+                "accuracy": acc,
+                "cm": cm.tolist(),
+            },
             f,
             indent=2,
             ensure_ascii=False,
@@ -850,6 +913,7 @@ def final_train_and_test(
     os.makedirs(student_dir, exist_ok=True)
     os.makedirs(tok_dir, exist_ok=True)
 
+    # trainval内でさらにsplitしてteacher/studentの安定用valを作る（testには触れない）
     tv_train, tv_val = train_test_split(
         df_trainval,
         test_size=min(0.1, args.val_ratio_for_final),
@@ -935,6 +999,7 @@ def run_optuna_kfold(args, df_trainval: pd.DataFrame, tokenizer) -> Dict[str, An
 
     def objective(trial: optuna.Trial) -> float:
         params = {
+            # student
             "lr": trial.suggest_float("lr", 5e-6, 3e-4, log=True),
             "weight_decay": trial.suggest_float("weight_decay", 0.0, 5e-2),
             "warmup_ratio": trial.suggest_float("warmup_ratio", 0.0, 0.15),
@@ -947,15 +1012,19 @@ def run_optuna_kfold(args, df_trainval: pd.DataFrame, tokenizer) -> Dict[str, An
             "max_length": args.max_length,
             "lr_scheduler_type": args.lr_scheduler_type,
 
+            # KD
             "distill_alpha": trial.suggest_float("distill_alpha", 0.15, 0.55),
             "temperature": trial.suggest_float("temperature", 1.5, 4.0),
             "rep_beta": trial.suggest_float("rep_beta", 0.0, 2.0),
 
+            # prior補正
             "prior_tau": trial.suggest_float("prior_tau", 0.0, 2.0),
 
+            # class weight緩和
             "class_weight_power": trial.suggest_float("class_weight_power", 0.3, 1.0),
             "class_weight_clip": trial.suggest_float("class_weight_clip", 1.5, 5.0),
 
+            # teacher強化（重いので控えめ）
             "teacher_lr": trial.suggest_float("teacher_lr", 5e-6, 5e-5, log=True),
             "teacher_weight_decay": trial.suggest_float("teacher_weight_decay", 0.0, 5e-2),
             "teacher_epochs": args.teacher_epochs,
@@ -967,6 +1036,7 @@ def run_optuna_kfold(args, df_trainval: pd.DataFrame, tokenizer) -> Dict[str, An
             "attention_probs_dropout_prob": args.attention_probs_dropout_prob,
         }
 
+        # LoRAはstudentのみ
         params["use_lora"] = bool(args.use_lora)
         params["lora_targets"] = args.lora_targets
         if params["use_lora"]:
@@ -992,8 +1062,6 @@ def run_optuna_kfold(args, df_trainval: pd.DataFrame, tokenizer) -> Dict[str, An
         )
 
         oof_mcc = float(res["oof_best"]["mcc"])
-        fold_mean_mcc = float(res["fold_mean_mcc"])
-        best_thr = float(res["best_threshold"])
 
         trial.report(oof_mcc, step=0)
         if trial.should_prune():
@@ -1002,9 +1070,9 @@ def run_optuna_kfold(args, df_trainval: pd.DataFrame, tokenizer) -> Dict[str, An
         df_log = pd.read_csv(trials_log_path)
         df_log = pd.concat([df_log, pd.DataFrame([{
             "trial": int(trial.number),
-            "oof_mcc": oof_mcc,
-            "fold_mean_mcc": fold_mean_mcc,
-            "best_thr": best_thr,
+            "oof_mcc": float(res["oof_best"]["mcc"]),
+            "fold_mean_mcc": float(res["fold_mean_mcc"]),
+            "best_thr": float(res["best_threshold"]),
             "params_json": json.dumps(params, ensure_ascii=False),
         }])], ignore_index=True)
         df_log.to_csv(trials_log_path, index=False)
@@ -1094,7 +1162,6 @@ def parse_args():
     p.add_argument("--teacher_attention_dropout_prob", type=float, default=0.0)
 
     p.add_argument("--amp", type=str, default="fp16", choices=["none", "fp16", "bf16"])
-
     p.add_argument("--eval_steps", type=int, default=50)
     p.add_argument("--logging_steps", type=int, default=50)
 
@@ -1127,8 +1194,6 @@ def main():
     must_dir(args.tokenizer_dir, "TOKENIZER_DIR")
     must_file(args.csv, "CSV")
 
-    if args.amp == "none":
-        args.amp = "none"
     if args.optuna_storage == "":
         args.optuna_storage = None
 
@@ -1137,9 +1202,11 @@ def main():
 
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_dir, use_fast=True)
 
+    # testは固定分割
     df = load_df(args.csv)
     df_trainval, df_test = stratified_test_split(df, test_ratio=args.test_ratio, seed=args.seed)
 
+    # Optuna or single run
     if args.use_optuna:
         best_info = run_optuna_kfold(args, df_trainval, tokenizer)
         trial_params = best_info["merged_best_params"]
@@ -1177,6 +1244,7 @@ def main():
             "lora_targets": args.lora_targets,
         }
 
+    # k-foldでOOF閾値を決める（最重要）
     kfold_dir = os.path.join(args.output_dir, "kfold_oof")
     ensure_empty_dir(kfold_dir)
 
@@ -1185,7 +1253,7 @@ def main():
         df_trainval=df_trainval,
         tokenizer=tokenizer,
         trial_params=trial_params,
-        save_models=False,
+        save_models=False,  # ディスク節約。必要ならTrueにしてfoldモデル保存
         work_dir=kfold_dir,
     )
 
@@ -1197,6 +1265,7 @@ def main():
     with open(os.path.join(args.output_dir, "chosen_threshold.json"), "w", encoding="utf-8") as f:
         json.dump({"fixed_threshold": best_thr, "prior_adjust": prior_adjust}, f, indent=2, ensure_ascii=False)
 
+    # 最終学習 & テスト評価（固定thr）
     if args.final_train_best:
         final_dir = os.path.join(args.output_dir, "final")
         test_metrics = final_train_and_test(
@@ -1210,8 +1279,12 @@ def main():
             out_dir=final_dir,
         )
         with open(os.path.join(final_dir, "summary.json"), "w", encoding="utf-8") as f:
-            json.dump({"fixed_threshold": best_thr, "prior_adjust": prior_adjust, "test": test_metrics},
-                      f, indent=2, ensure_ascii=False)
+            json.dump(
+                {"fixed_threshold": best_thr, "prior_adjust": prior_adjust, "test": test_metrics},
+                f,
+                indent=2,
+                ensure_ascii=False,
+            )
 
     print("Done.")
 
