@@ -9,7 +9,7 @@ STUDENT_MODEL_DIR="/home/gonken2020/gen/medical-BERT-project/medical_BERT_model/
 TEACHER_BASE_DIR="${STUDENT_MODEL_DIR}"
 TOKENIZER_DIR="/home/gonken2020/gen/medical-BERT-project/medical_BERT_model/experiment_3/pretraining_bert_2/pretraining_bert_best/tokenizer"
 
-CSV_PATH="/home/gonken2020/gen/medical-BERT-project/data/learning_data.csv"
+CSV_PATH="/home/gonken2020/gen/medical-BERT-project/medical_BERT_model/experiment_3/data/learning_data.csv"
 
 OUT_DIR="${PROJECT_ROOT}/result_kfold_kd_lora_single"
 STUDY_DIR="${OUT_DIR}/optuna_study"  # 使わないが引数上必要なので作る
