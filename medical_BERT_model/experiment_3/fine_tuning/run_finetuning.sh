@@ -9,16 +9,16 @@ PROJECT_DIR="/home/gonken2020/gen/medical-BERT-project/medical_BERT_model/experi
 SCRIPT="${PROJECT_DIR}/fine_tuning.py"
 
 # student（pretraining_bert_2 の出力）
-STUDENT_MODEL_DIR="/home/gonken2020/gen/medical-BERT-project/medical_BERT_model/experiment_3/pretraining_bert_2/pretrain_phase2_model"
+STUDENT_MODEL_DIR="/home/gonken2020/gen/medical-BERT-project/medical_BERT_model/experiment_3/pretraining_bert_2/pretraining_bert_best/best_model"
 
 # teacher（強いモデルを推奨）
-TEACHER_BASE_DIR="/home/gonken2020/gen/medical-BERT-project/models/teacher_strong_model"
+TEACHER_BASE_DIR="${STUDENT_MODEL_DIR}"
 
 # tokenizer（通常はstudentと同じ）
-TOKENIZER_DIR="${STUDENT_MODEL_DIR}"
+TOKENIZER_DIR="/home/gonken2020/gen/medical-BERT-project/medical_BERT_model/experiment_3/pretraining_bert_2/pretraining_bert_best/tokenizer"
 
 # 学習データ
-CSV_PATH="/home/gonken2020/gen/medical-BERT-project/data/chart_binary.csv"
+CSV_PATH="/home/gonken2020/gen/medical-BERT-project/medical_BERT_model/experiment_3/data/learning_data.csv"
 
 # 出力
 OUT_DIR="${PROJECT_DIR}/result_distill_kfold"
