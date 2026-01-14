@@ -1188,12 +1188,12 @@ def run_optuna_kfold(args, df_trainval: pd.DataFrame, tokenizer) -> Dict[str, An
     def objective(trial: optuna.Trial) -> float:
         params = {
             # student
-            "lr": trial.suggest_float("lr", 5e-6, 3e-4, log=True),
-            "weight_decay": trial.suggest_float("weight_decay", 0.0, 5e-2),
-            "warmup_ratio": trial.suggest_float("warmup_ratio", 0.0, 0.15),
-            "label_smoothing": trial.suggest_float("label_smoothing", 0.0, 0.1),
+            "lr": trial.suggest_float("lr", 1e-5, 1e-4, log=True),
+            "weight_decay": trial.suggest_float("weight_decay", 0.0, 4e-2),
+            "warmup_ratio": trial.suggest_float("warmup_ratio", 0.0, 2e-3),
+            "label_smoothing": trial.suggest_float("label_smoothing", 0.0, 2e-2),
             "hidden_dropout_prob": trial.suggest_float("hidden_dropout_prob", 0.0, 0.2),
-            "classifier_dropout": trial.suggest_float("classifier_dropout", 0.0, 0.4),
+            "classifier_dropout": trial.suggest_float("classifier_dropout", 0.0, 0.3),
             "batch_size": trial.suggest_categorical("batch_size", [8, 16]),
             "grad_accum": trial.suggest_categorical("grad_accum", [1, 2, 4, 8]),
             "epochs": args.epochs,
@@ -1201,19 +1201,19 @@ def run_optuna_kfold(args, df_trainval: pd.DataFrame, tokenizer) -> Dict[str, An
             "lr_scheduler_type": args.lr_scheduler_type,
 
             # KD
-            "distill_alpha": trial.suggest_float("distill_alpha", 0.15, 0.55),
-            "temperature": trial.suggest_float("temperature", 1.5, 4.0),
+            "distill_alpha": trial.suggest_float("distill_alpha", 0.20, 0.35),
+            "temperature": trial.suggest_float("temperature", 3.5, 5.0),
             "rep_beta": trial.suggest_float("rep_beta", 0.0, 2.0),
 
             # prior補正
-            "prior_tau": trial.suggest_float("prior_tau", 0.0, 2.0),
+            "prior_tau": trial.suggest_float("prior_tau", 0.0, 1.0),
 
             # class weight緩和
-            "class_weight_power": trial.suggest_float("class_weight_power", 0.3, 1.0),
-            "class_weight_clip": trial.suggest_float("class_weight_clip", 1.5, 5.0),
+            "class_weight_power": trial.suggest_float("class_weight_power", 0.3, 0.6),
+            "class_weight_clip": trial.suggest_float("class_weight_clip", 1.2, 2.5),
 
             # teacher強化（重いので控えめ）
-            "teacher_lr": trial.suggest_float("teacher_lr", 5e-6, 5e-5, log=True),
+            "teacher_lr": trial.suggest_float("teacher_lr", 1e-5, 5e-5, log=True),
             "teacher_weight_decay": trial.suggest_float("teacher_weight_decay", 0.0, 5e-2),
             "teacher_epochs": args.teacher_epochs,
             "teacher_label_smoothing": trial.suggest_float("teacher_label_smoothing", 0.0, 0.1),

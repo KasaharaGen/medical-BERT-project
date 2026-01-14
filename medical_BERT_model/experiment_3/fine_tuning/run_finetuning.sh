@@ -21,13 +21,13 @@ TOKENIZER_DIR="/home/gonken2020/gen/medical-BERT-project/medical_BERT_model/expe
 CSV_PATH="/home/gonken2020/gen/medical-BERT-project/medical_BERT_model/experiment_3/data/learning_data.csv"
 
 # 出力
-OUT_DIR="${PROJECT_DIR}/result_distill_kfold"
+OUT_DIR="${PROJECT_DIR}/result_distill_kfold_2"
 STUDY_DIR="${PROJECT_DIR}/optuna_study"
 
 # ========= Optuna設定 =========
 # SQLite推奨（ENOSPC回避のため、十分空きがある場所へ）
 # 例: /home/gonken2020/gen/medical-BERT-project/optuna/optuna.db
-OPTUNA_DB="/home/gonken2020/gen/medical-BERT-project/optuna/optuna.db"
+OPTUNA_DB="/home/gonken2020/gen/medical-BERT-project/optuna/optuna_2.db"
 STUDY_NAME="kd_seqcls_kfold"
 
 N_TRIALS=30
