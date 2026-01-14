@@ -2,32 +2,30 @@
 # -*- coding: utf-8 -*-
 
 """
-fine_tuning.py (refactored)
+fine_tuning.py (tokenizer-separated teacher/student)
 
-追加要件（今回）:
-- 成果物として curve_eval_metrics.png, curve_loss.png を出力する（以前と同様）
+主目的:
+- teacher と student のトークナイザーを分離して蒸留を成立させる
+  (teacherにDeBERTa/RoBERTa/Longformer等の別アーキテクチャを入れても破綻しない)
 
-実装方針:
-- Trainerのlogging/evaluateイベントをCallbackでフックし、学習中の
-  - train_loss（logging）
-  - eval_loss（evaluate時のmetrics）
-  - eval_mcc/eval_f1/eval_acc（evaluate時に「自前推論 + 閾値最適化」で算出）
-  を時系列で保存し、matplotlibで2枚のpngを生成する。
-
-重要:
-- ragged predictions 問題回避のため、評価指標計算は Trainer の予測結果に依存せず、
-  predict_logits_with_dataloader() を必ず使う。
-
-要求仕様（継続）:
-- 混同行列: Blues に統一 + セル内は%表記（all or true）
-- Validation(OOF)で閾値最適化 -> Testは固定閾値で評価
+継続仕様（これまでの要件）:
+- 蒸留付きFT（logits蒸留 + 表現蒸留）
+- 可能ならLoRA（studentのみ, peftがあれば）
+- Validation(OOF)で閾値最適化 → Testは固定閾値
 - Logit Adjustment / Prior補正
-- クラス重みの緩和（power/clip）
-- 表現蒸留（CLS MSE）
-- Teacher強化（foldごとにTeacher教師ありFT -> そのTeacherでStudent蒸留）
-- Stratified K-fold（testは固定分割、trainvalはK-fold）
-- GPU 1枚前提（DDPなし）
-- LoRAはpeftがあればstudentに適用可能（teacherには適用しない）
+- クラス重み緩和（power/clip）
+- Teacher強化（foldごと supervised FT）
+- Stratified K-fold
+- 混同行列: Blues統一 + %表記
+- curve_loss.png, curve_eval_metrics.png 出力（final学習時）
+
+重要な実装変更点:
+- student学習データは "text" を保持し、DistillTrainer.compute_lossで teacher_tokenizer により
+  その場で teacher 入力をtokenizeする（teacherとstudentでtokenizer不一致OK）
+- Teacherの教師あり学習は teacher_tokenizer で通常通り tokenization（text保持不要）
+
+注意:
+- teacher側tokenizeを毎step行うため計算コストは増える（正しさ優先）
 """
 
 import os
@@ -60,7 +58,6 @@ from transformers import (
     AutoModelForSequenceClassification,
     Trainer,
     TrainingArguments,
-    DataCollatorWithPadding,
     set_seed,
     TrainerCallback,
 )
@@ -99,6 +96,10 @@ def ensure_empty_dir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
 
 
+def get_device() -> str:
+    return "cuda" if torch.cuda.is_available() else "cpu"
+
+
 # =========================
 # データ
 # =========================
@@ -130,19 +131,52 @@ def tokenize_dataset(
     df: pd.DataFrame,
     tokenizer,
     max_length: int,
+    keep_text: bool,
 ) -> Dataset:
     """
-    重要: set_format(type="torch") をしない。
-    DataCollatorWithPaddingにpadを任せる。
+    keep_text=True : Datasetに text を残す（student蒸留で teacher_tokenizer を使うため）
+    keep_text=False: textを削除して軽量化（teacher supervised 等）
     """
     ds = Dataset.from_pandas(df.reset_index(drop=True))
 
     def _tok_map(batch):
-        return tokenizer(batch["text"], truncation=True, max_length=max_length, padding=False)
+        tok = tokenizer(batch["text"], truncation=True, max_length=max_length, padding=False)
+        if keep_text:
+            tok["text"] = batch["text"]
+        return tok
 
-    ds = ds.map(_tok_map, batched=True, remove_columns=["text"])
-    ds = ds.rename_column("label", "labels")
+    remove_cols = [] if keep_text else ["text"]
+    ds = ds.map(_tok_map, batched=True, remove_columns=remove_cols)
+    ds = ds.rename_column("label", "labels") if "label" in ds.column_names else ds
     return ds
+
+
+# =========================
+# Collator（text保持対応）
+# =========================
+class CollatorWithText:
+    """
+    Hugging Faceのpadを使いつつ、textがあれば保持して返す。
+    """
+    def __init__(self, tokenizer, pad_to_multiple_of: Optional[int] = 8):
+        self.tokenizer = tokenizer
+        self.pad_to_multiple_of = pad_to_multiple_of
+
+    def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, Any]:
+        texts = None
+        if len(features) > 0 and "text" in features[0]:
+            texts = [f["text"] for f in features]
+            features = [{k: v for k, v in f.items() if k != "text"} for f in features]
+
+        batch = self.tokenizer.pad(
+            features,
+            padding=True,
+            pad_to_multiple_of=self.pad_to_multiple_of,
+            return_tensors="pt",
+        )
+        if texts is not None:
+            batch["text"] = texts
+        return batch
 
 
 # =========================
@@ -180,10 +214,6 @@ def compute_prior_logit_adjustment(train_labels: np.ndarray) -> float:
 
 
 def apply_logit_adjustment(logits: torch.Tensor, adjust: float, tau: float) -> torch.Tensor:
-    """
-    logits: [B,2]
-    logits[:,1] -= tau * adjust
-    """
     if tau == 0.0:
         return logits
     out = logits.clone()
@@ -236,24 +266,19 @@ def logits_to_prob1(logits_np: np.ndarray) -> np.ndarray:
 
 
 # =========================
-# 推論（ragged回避のため自前）
+# 推論（ragged回避）
 # =========================
 @torch.no_grad()
 def predict_logits_with_dataloader(
     model: nn.Module,
     dataset: Dataset,
-    tokenizer,
+    collator,
     batch_size: int,
     amp: str = "fp16",
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    logitsを必ず [N,2] で返す。
-    Trainer.predict由来のragged predictions問題を回避する。
-    """
     from torch.utils.data import DataLoader
 
-    collator = DataCollatorWithPadding(tokenizer, pad_to_multiple_of=8)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = get_device()
     model.eval()
     model.to(device)
 
@@ -273,6 +298,10 @@ def predict_logits_with_dataloader(
 
     with torch.cuda.amp.autocast(enabled=use_amp, dtype=autocast_dtype):
         for batch in loader:
+            # textが混じっていても無視する
+            if "text" in batch:
+                batch = {k: v for k, v in batch.items() if k != "text"}
+
             input_ids = batch["input_ids"].to(device, non_blocking=True)
             attention_mask = batch["attention_mask"].to(device, non_blocking=True)
             labels = batch["labels"].cpu().numpy()
@@ -292,10 +321,6 @@ def predict_logits_with_dataloader(
 # 曲線プロット（loss/metrics）
 # =========================
 def plot_curve_loss(history: List[Dict[str, Any]], out_path: str) -> None:
-    """
-    history item例:
-      {"step": int, "train_loss": float|None, "eval_loss": float|None}
-    """
     steps = [h["step"] for h in history]
     train_loss = [h.get("train_loss", None) for h in history]
     eval_loss = [h.get("eval_loss", None) for h in history]
@@ -320,10 +345,6 @@ def plot_curve_loss(history: List[Dict[str, Any]], out_path: str) -> None:
 
 
 def plot_curve_eval_metrics(history: List[Dict[str, Any]], out_path: str) -> None:
-    """
-    history item例:
-      {"step": int, "eval_mcc": float|None, "eval_f1": float|None, "eval_acc": float|None, "eval_thr": float|None}
-    """
     steps = [h["step"] for h in history]
 
     def _series(key):
@@ -383,15 +404,21 @@ def force_classifier_trainable(model: nn.Module) -> None:
 
 
 # =========================
-# 蒸留Trainer（logits KD + 表現蒸留 + prior補正 + クラス重み）
+# 蒸留Trainer（tokenizer分離版）
 # =========================
 class DistillTrainer(Trainer):
     """
     loss = (1-alpha)*CE + alpha*T^2*KL(teacher||student) + beta*MSE(CLS_teacher, CLS_student)
+
+    重要:
+    - inputs に "text"（list[str]）を含める
+    - teacherは teacher_tokenizer でこのtextをtokenizeしてforwardする
     """
     def __init__(
         self,
         teacher_model: nn.Module,
+        teacher_tokenizer,
+        teacher_max_length: int,
         distill_alpha: float,
         temperature: float,
         rep_beta: float,
@@ -399,10 +426,14 @@ class DistillTrainer(Trainer):
         label_smoothing: float,
         prior_adjust: float,
         prior_tau: float,
+        amp: str,
         *args, **kwargs,
     ):
         super().__init__(*args, **kwargs)
         self.teacher_model = teacher_model
+        self.teacher_tokenizer = teacher_tokenizer
+        self.teacher_max_length = int(teacher_max_length)
+
         self.distill_alpha = float(distill_alpha)
         self.temperature = float(temperature)
         self.rep_beta = float(rep_beta)
@@ -410,6 +441,7 @@ class DistillTrainer(Trainer):
         self.label_smoothing = float(label_smoothing)
         self.prior_adjust = float(prior_adjust)
         self.prior_tau = float(prior_tau)
+        self.amp = amp
 
         self.kl = nn.KLDivLoss(reduction="batchmean")
         self.mse = nn.MSELoss(reduction="mean")
@@ -420,13 +452,16 @@ class DistillTrainer(Trainer):
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         labels = inputs.get("labels")
-        model_inputs = {k: v for k, v in inputs.items() if k != "labels"}
+
+        # student inputs（textは除く）
+        texts = inputs.get("text", None)
+        model_inputs = {k: v for k, v in inputs.items() if k not in ["labels", "text"]}
 
         out_s = model(**model_inputs, output_hidden_states=True)
         logits_s = out_s.logits
         device = logits_s.device
 
-        # teacherをstudentと同deviceへ
+        # teacherを同deviceへ
         t_dev = next(self.teacher_model.parameters()).device
         if t_dev != device:
             self.teacher_model.to(device)
@@ -434,8 +469,21 @@ class DistillTrainer(Trainer):
             for p in self.teacher_model.parameters():
                 p.requires_grad = False
 
+        # teacher inputs（teacher_tokenizerでtextをtokenize）
+        if texts is None:
+            raise RuntimeError("tokenizer分離蒸留には inputs['text'] が必要である（Dataset/collatorを確認）。")
+
+        teacher_batch = self.teacher_tokenizer(
+            list(texts),
+            truncation=True,
+            max_length=self.teacher_max_length,
+            padding=True,
+            return_tensors="pt",
+        )
+        teacher_batch = {k: v.to(device) for k, v in teacher_batch.items()}
+
         with torch.no_grad():
-            out_t = self.teacher_model(**model_inputs, output_hidden_states=True)
+            out_t = self.teacher_model(**teacher_batch, output_hidden_states=True)
             logits_t = out_t.logits
 
         # prior補正
@@ -466,21 +514,11 @@ class DistillTrainer(Trainer):
 
 
 # =========================
-# 曲線出力Callback（studentの最終学習で使用）
+# 曲線出力Callback（final学習で使用）
 # =========================
 class CurveLoggerCallback(TrainerCallback):
-    """
-    - on_log: train_loss を拾う
-    - on_evaluate: eval_loss（Trainer側metrics） + 自前推論によるeval_mcc/f1/acc（閾値最適化）を記録
-    - train_end: curve_loss.png / curve_eval_metrics.png を保存
-
-    注意:
-    - 自前推論は重いが、eval_steps間隔なので許容とする。
-    """
-
     def __init__(
         self,
-        tokenizer,
         eval_dataset: Dataset,
         out_dir: str,
         amp: str,
@@ -488,9 +526,9 @@ class CurveLoggerCallback(TrainerCallback):
         threshold_grid: int,
         prior_adjust: float,
         prior_tau: float,
+        collator,
         prefix: str = "",
     ):
-        self.tokenizer = tokenizer
         self.eval_dataset = eval_dataset
         self.out_dir = out_dir
         self.amp = amp
@@ -498,15 +536,13 @@ class CurveLoggerCallback(TrainerCallback):
         self.threshold_grid = threshold_grid
         self.prior_adjust = float(prior_adjust)
         self.prior_tau = float(prior_tau)
+        self.collator = collator
         self.prefix = prefix
 
         self.history: List[Dict[str, Any]] = []
-        self._last_step = 0
-
         os.makedirs(self.out_dir, exist_ok=True)
 
     def _ensure_row(self, step: int) -> Dict[str, Any]:
-        # 同stepの行があればそれを返す、なければ追加
         for h in reversed(self.history):
             if h.get("step") == step:
                 return h
@@ -518,26 +554,24 @@ class CurveLoggerCallback(TrainerCallback):
         if not logs:
             return
         step = int(state.global_step)
-        self._last_step = step
         row = self._ensure_row(step)
         if "loss" in logs and logs["loss"] is not None:
             row["train_loss"] = float(logs["loss"])
 
     def on_evaluate(self, args, state, control, metrics=None, model=None, **kwargs):
         step = int(state.global_step)
-        self._last_step = step
         row = self._ensure_row(step)
 
         if metrics and "eval_loss" in metrics and metrics["eval_loss"] is not None:
             row["eval_loss"] = float(metrics["eval_loss"])
 
-        # 自前推論で eval metrics（閾値最適化）を算出
         if model is None:
             return
+
         logits, labels = predict_logits_with_dataloader(
             model=model,
             dataset=self.eval_dataset,
-            tokenizer=self.tokenizer,
+            collator=self.collator,
             batch_size=max(8, int(self.batch_size)),
             amp=self.amp,
         )
@@ -552,12 +586,10 @@ class CurveLoggerCallback(TrainerCallback):
         row["eval_thr"] = float(best["thr"])
 
     def on_train_end(self, args, state, control, **kwargs):
-        # history保存
         hist_path = os.path.join(self.out_dir, f"{self.prefix}curve_history.json")
         with open(hist_path, "w", encoding="utf-8") as f:
             json.dump(self.history, f, indent=2, ensure_ascii=False)
 
-        # 図保存（要求: curve_loss.png, curve_eval_metrics.png）
         loss_path = os.path.join(self.out_dir, f"{self.prefix}curve_loss.png")
         eval_path = os.path.join(self.out_dir, f"{self.prefix}curve_eval_metrics.png")
         plot_curve_loss(self.history, loss_path)
@@ -574,11 +606,6 @@ def plot_confusion_matrix_percent_blues(
     percent_mode: str = "all",
     fontsize: int = 18,
 ) -> None:
-    """
-    percent_mode:
-      - "all": 全サンプルに対する比率(%)
-      - "true": 行正規化（Trueラベルごとの%）
-    """
     cm = np.array(cm, dtype=float)
     if percent_mode == "true":
         row_sum = cm.sum(axis=1, keepdims=True)
@@ -620,16 +647,16 @@ def plot_confusion_matrix_percent_blues(
 # =========================
 def train_teacher_supervised(
     args,
-    tokenizer,
+    teacher_tokenizer,
     train_df: pd.DataFrame,
     val_df: pd.DataFrame,
     output_dir: str,
     trial_params: Dict[str, Any],
     save_model: bool,
 ) -> Tuple[AutoModelForSequenceClassification, Dict[str, float]]:
-    max_length = int(trial_params.get("max_length", args.max_length))
-    ds_tr = tokenize_dataset(train_df, tokenizer, max_length=max_length)
-    ds_va = tokenize_dataset(val_df, tokenizer, max_length=max_length)
+    max_length = int(trial_params.get("teacher_max_length", args.teacher_max_length))
+    ds_tr = tokenize_dataset(train_df, teacher_tokenizer, max_length=max_length, keep_text=False)
+    ds_va = tokenize_dataset(val_df, teacher_tokenizer, max_length=max_length, keep_text=False)
 
     train_labels = train_df["label"].values
     cw = None
@@ -650,7 +677,8 @@ def train_teacher_supervised(
     )
 
     teacher = AutoModelForSequenceClassification.from_pretrained(args.teacher_base_dir, config=teacher_config)
-    collator = DataCollatorWithPadding(tokenizer, pad_to_multiple_of=8)
+
+    collator = CollatorWithText(teacher_tokenizer, pad_to_multiple_of=8)
 
     amp = args.amp
     fp16 = (amp == "fp16")
@@ -703,7 +731,7 @@ def train_teacher_supervised(
 
         def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
             labels = inputs.get("labels")
-            model_inputs = {k: v for k, v in inputs.items() if k != "labels"}
+            model_inputs = {k: v for k, v in inputs.items() if k not in ["labels", "text"]}
             out = model(**model_inputs)
             logits = out.logits
             device = logits.device
@@ -717,7 +745,7 @@ def train_teacher_supervised(
         args=tr_args,
         train_dataset=ds_tr,
         eval_dataset=ds_va,
-        tokenizer=tokenizer,
+        tokenizer=teacher_tokenizer,
         data_collator=collator,
         class_weight=cw,
         label_smoothing=float(trial_params.get("teacher_label_smoothing", args.teacher_label_smoothing)),
@@ -738,7 +766,8 @@ def train_teacher_supervised(
 # =========================
 def train_student_distill(
     args,
-    tokenizer,
+    student_tokenizer,
+    teacher_tokenizer,
     teacher_model: nn.Module,
     train_df: pd.DataFrame,
     val_df: pd.DataFrame,
@@ -746,13 +775,16 @@ def train_student_distill(
     trial_params: Dict[str, Any],
     prior_adjust: float,
     save_model: bool,
-    curve_out_dir: Optional[str] = None,   # ★追加: curve出力先（Noneなら出さない）
-    curve_prefix: str = "",                # ★追加: 出力ファイル名prefix（通常は""）
+    curve_out_dir: Optional[str] = None,
+    curve_prefix: str = "",
 ) -> Tuple[AutoModelForSequenceClassification, Dict[str, float], np.ndarray, np.ndarray]:
-    max_length = int(trial_params.get("max_length", args.max_length))
 
-    ds_tr = tokenize_dataset(train_df, tokenizer, max_length=max_length)
-    ds_va = tokenize_dataset(val_df, tokenizer, max_length=max_length)
+    student_max_length = int(trial_params.get("max_length", args.max_length))
+    teacher_max_length = int(trial_params.get("teacher_max_length", args.teacher_max_length))
+
+    # student側は text を保持（teacher tokenize用）
+    ds_tr = tokenize_dataset(train_df, student_tokenizer, max_length=student_max_length, keep_text=True)
+    ds_va = tokenize_dataset(val_df, student_tokenizer, max_length=student_max_length, keep_text=True)
 
     train_labels = train_df["label"].values
     cw = None
@@ -788,7 +820,7 @@ def train_student_distill(
 
     force_classifier_trainable(student)
 
-    collator = DataCollatorWithPadding(tokenizer, pad_to_multiple_of=8)
+    collator_student = CollatorWithText(student_tokenizer, pad_to_multiple_of=8)
 
     amp = args.amp
     fp16 = (amp == "fp16")
@@ -833,41 +865,39 @@ def train_student_distill(
         disable_tqdm=True,
     )
 
-    distill_alpha = float(trial_params.get("distill_alpha", args.distill_alpha))
-    temperature = float(trial_params.get("temperature", args.temperature))
-    rep_beta = float(trial_params.get("rep_beta", args.rep_beta))
-    label_smoothing = float(trial_params.get("label_smoothing", args.label_smoothing))
-    prior_tau = float(trial_params.get("prior_tau", args.prior_tau))
-
     trainer = DistillTrainer(
         model=student,
         args=tr_args,
         train_dataset=ds_tr,
         eval_dataset=ds_va,
-        tokenizer=tokenizer,
-        data_collator=collator,
+        tokenizer=student_tokenizer,
+        data_collator=collator_student,
+
         teacher_model=teacher_model,
-        distill_alpha=distill_alpha,
-        temperature=temperature,
-        rep_beta=rep_beta,
+        teacher_tokenizer=teacher_tokenizer,
+        teacher_max_length=teacher_max_length,
+
+        distill_alpha=float(trial_params.get("distill_alpha", args.distill_alpha)),
+        temperature=float(trial_params.get("temperature", args.temperature)),
+        rep_beta=float(trial_params.get("rep_beta", args.rep_beta)),
         class_weight=cw,
-        label_smoothing=label_smoothing,
+        label_smoothing=float(trial_params.get("label_smoothing", args.label_smoothing)),
         prior_adjust=prior_adjust,
-        prior_tau=prior_tau,
+        prior_tau=float(trial_params.get("prior_tau", args.prior_tau)),
+        amp=args.amp,
     )
 
-    # ★追加: curve出力（最終学習時だけon）
     if curve_out_dir is not None:
         trainer.add_callback(
             CurveLoggerCallback(
-                tokenizer=tokenizer,
                 eval_dataset=ds_va,
                 out_dir=curve_out_dir,
                 amp=args.amp,
                 batch_size=int(trial_params.get("batch_size", args.batch_size)),
                 threshold_grid=int(args.threshold_grid),
                 prior_adjust=prior_adjust,
-                prior_tau=prior_tau,
+                prior_tau=float(trial_params.get("prior_tau", args.prior_tau)),
+                collator=collator_student,
                 prefix=curve_prefix,
             )
         )
@@ -875,18 +905,17 @@ def train_student_distill(
     trainer.train()
     eval_metrics = trainer.evaluate()
 
-    # ★重要: Trainer.predictはraggedになることがあるので使わない
+    # validation logits（studentのみ。teacher tokenizer不要）
     val_logits, val_labels = predict_logits_with_dataloader(
         model=trainer.model,
-        dataset=ds_va,
-        tokenizer=tokenizer,
+        dataset=ds_va.remove_columns(["text"]),
+        collator=CollatorWithText(student_tokenizer, pad_to_multiple_of=8),
         batch_size=max(8, int(trial_params.get("batch_size", args.batch_size))),
         amp=args.amp,
     )
 
-    # prior補正後logitsでprobを作る
     val_logits_t = torch.tensor(val_logits, dtype=torch.float32)
-    val_logits_adj = apply_logit_adjustment(val_logits_t, prior_adjust, prior_tau).numpy()
+    val_logits_adj = apply_logit_adjustment(val_logits_t, prior_adjust, float(trial_params.get("prior_tau", args.prior_tau))).numpy()
     val_prob1 = logits_to_prob1(val_logits_adj)
 
     if save_model:
@@ -903,7 +932,8 @@ def train_student_distill(
 def kfold_oof_train_eval(
     args,
     df_trainval: pd.DataFrame,
-    tokenizer,
+    student_tokenizer,
+    teacher_tokenizer,
     trial_params: Dict[str, Any],
     save_models: bool,
     work_dir: str,
@@ -933,7 +963,7 @@ def kfold_oof_train_eval(
 
         teacher_model, teacher_eval = train_teacher_supervised(
             args=args,
-            tokenizer=tokenizer,
+            teacher_tokenizer=teacher_tokenizer,
             train_df=train_df,
             val_df=val_df,
             output_dir=teacher_dir,
@@ -943,7 +973,8 @@ def kfold_oof_train_eval(
 
         _, student_eval, val_prob1, val_labels = train_student_distill(
             args=args,
-            tokenizer=tokenizer,
+            student_tokenizer=student_tokenizer,
+            teacher_tokenizer=teacher_tokenizer,
             teacher_model=teacher_model,
             train_df=train_df,
             val_df=val_df,
@@ -951,7 +982,7 @@ def kfold_oof_train_eval(
             trial_params=trial_params,
             prior_adjust=prior_adjust,
             save_model=save_models,
-            curve_out_dir=None,    # kfold中はcurveは出さない（重い/不要）
+            curve_out_dir=None,
         )
 
         best_fold = sweep_threshold_best_mcc(val_prob1, val_labels, n_grid=args.threshold_grid)
@@ -975,7 +1006,6 @@ def kfold_oof_train_eval(
         del teacher_model
         torch.cuda.empty_cache()
 
-    # OOF全体でthr最適化（これをtestに固定適用）
     oof_best = sweep_threshold_best_mcc(oof_prob1, oof_labels, n_grid=args.threshold_grid)
 
     return {
@@ -999,7 +1029,7 @@ def kfold_oof_train_eval(
 @torch.no_grad()
 def evaluate_on_test_fixed_threshold(
     args,
-    tokenizer,
+    student_tokenizer,
     student_model_dir: str,
     test_df: pd.DataFrame,
     max_length: int,
@@ -1008,16 +1038,16 @@ def evaluate_on_test_fixed_threshold(
     fixed_thr: float,
     out_dir: str,
 ) -> Dict[str, Any]:
-    ds_te = tokenize_dataset(test_df, tokenizer, max_length=max_length)
+    ds_te = tokenize_dataset(test_df, student_tokenizer, max_length=max_length, keep_text=False)
+    collator = CollatorWithText(student_tokenizer, pad_to_multiple_of=8)
 
     model = AutoModelForSequenceClassification.from_pretrained(student_model_dir)
     model.eval()
 
-    # logitsを自前で収集（[N,2]保証）
     logits, labels = predict_logits_with_dataloader(
         model=model,
         dataset=ds_te,
-        tokenizer=tokenizer,
+        collator=collator,
         batch_size=args.batch_size,
         amp=args.amp,
     )
@@ -1081,13 +1111,14 @@ def final_train_and_test(
     args,
     df_trainval: pd.DataFrame,
     df_test: pd.DataFrame,
-    tokenizer,
+    student_tokenizer,
+    teacher_tokenizer,
     trial_params: Dict[str, Any],
     best_threshold: float,
     prior_adjust: float,
     out_dir: str,
 ) -> Dict[str, Any]:
-    max_length = int(trial_params.get("max_length", args.max_length))
+    student_max_length = int(trial_params.get("max_length", args.max_length))
 
     ensure_empty_dir(out_dir)
     teacher_dir = os.path.join(out_dir, "teacher_final")
@@ -1097,7 +1128,6 @@ def final_train_and_test(
     os.makedirs(student_dir, exist_ok=True)
     os.makedirs(tok_dir, exist_ok=True)
 
-    # trainval内でさらにsplitしてteacher/studentの安定用valを作る（testには触れない）
     tv_train, tv_val = train_test_split(
         df_trainval,
         test_size=min(0.1, args.val_ratio_for_final),
@@ -1110,7 +1140,7 @@ def final_train_and_test(
 
     teacher_model, teacher_eval = train_teacher_supervised(
         args=args,
-        tokenizer=tokenizer,
+        teacher_tokenizer=teacher_tokenizer,
         train_df=tv_train,
         val_df=tv_val,
         output_dir=teacher_dir,
@@ -1118,11 +1148,11 @@ def final_train_and_test(
         save_model=True,
     )
 
-    # ★ここでcurveをfinal配下に出す
     student_work_dir = os.path.join(out_dir, "student_final_work")
     _, student_eval, _, _ = train_student_distill(
         args=args,
-        tokenizer=tokenizer,
+        student_tokenizer=student_tokenizer,
+        teacher_tokenizer=teacher_tokenizer,
         teacher_model=teacher_model,
         train_df=tv_train,
         val_df=tv_val,
@@ -1130,8 +1160,8 @@ def final_train_and_test(
         trial_params=trial_params,
         prior_adjust=prior_adjust,
         save_model=True,
-        curve_out_dir=out_dir,    # <- curve_loss.png / curve_eval_metrics.png をここに出す
-        curve_prefix="",          # 要求通りファイル名は固定
+        curve_out_dir=out_dir,   # curve_loss.png / curve_eval_metrics.png
+        curve_prefix="",
     )
 
     src_student = os.path.join(student_work_dir, "student_model")
@@ -1140,7 +1170,7 @@ def final_train_and_test(
     shutil.rmtree(student_dir, ignore_errors=True)
     shutil.copytree(src_student, student_dir)
 
-    tokenizer.save_pretrained(tok_dir)
+    student_tokenizer.save_pretrained(tok_dir)
 
     with open(os.path.join(out_dir, "final_train_params.json"), "w", encoding="utf-8") as f:
         json.dump(trial_params, f, indent=2, ensure_ascii=False)
@@ -1151,10 +1181,10 @@ def final_train_and_test(
 
     test_metrics = evaluate_on_test_fixed_threshold(
         args=args,
-        tokenizer=tokenizer,
+        student_tokenizer=student_tokenizer,
         student_model_dir=student_dir,
         test_df=df_test,
-        max_length=max_length,
+        max_length=student_max_length,
         prior_adjust=prior_adjust,
         prior_tau=float(trial_params.get("prior_tau", args.prior_tau)),
         fixed_thr=best_threshold,
@@ -1167,7 +1197,7 @@ def final_train_and_test(
 # =========================
 # Optuna（K-fold objective）
 # =========================
-def run_optuna_kfold(args, df_trainval: pd.DataFrame, tokenizer) -> Dict[str, Any]:
+def run_optuna_kfold(args, df_trainval: pd.DataFrame, student_tokenizer, teacher_tokenizer) -> Dict[str, Any]:
     os.makedirs(args.study_dir, exist_ok=True)
 
     pruner = MedianPruner(n_startup_trials=max(5, args.n_startup_trials)) if args.use_pruner else optuna.pruners.NopPruner()
@@ -1187,33 +1217,28 @@ def run_optuna_kfold(args, df_trainval: pd.DataFrame, tokenizer) -> Dict[str, An
 
     def objective(trial: optuna.Trial) -> float:
         params = {
-            # student
-            "lr": trial.suggest_float("lr", 1e-5, 1e-4, log=True),
-            "weight_decay": trial.suggest_float("weight_decay", 0.0, 4e-2),
-            "warmup_ratio": trial.suggest_float("warmup_ratio", 0.0, 2e-3),
-            "label_smoothing": trial.suggest_float("label_smoothing", 0.0, 2e-2),
+            "lr": trial.suggest_float("lr", 5e-6, 3e-4, log=True),
+            "weight_decay": trial.suggest_float("weight_decay", 0.0, 5e-2),
+            "warmup_ratio": trial.suggest_float("warmup_ratio", 0.0, 0.15),
+            "label_smoothing": trial.suggest_float("label_smoothing", 0.0, 0.1),
             "hidden_dropout_prob": trial.suggest_float("hidden_dropout_prob", 0.0, 0.2),
-            "classifier_dropout": trial.suggest_float("classifier_dropout", 0.0, 0.3),
+            "classifier_dropout": trial.suggest_float("classifier_dropout", 0.0, 0.4),
             "batch_size": trial.suggest_categorical("batch_size", [8, 16]),
             "grad_accum": trial.suggest_categorical("grad_accum", [1, 2, 4, 8]),
             "epochs": args.epochs,
             "max_length": args.max_length,
             "lr_scheduler_type": args.lr_scheduler_type,
 
-            # KD
-            "distill_alpha": trial.suggest_float("distill_alpha", 0.20, 0.35),
-            "temperature": trial.suggest_float("temperature", 3.5, 5.0),
+            "distill_alpha": trial.suggest_float("distill_alpha", 0.15, 0.55),
+            "temperature": trial.suggest_float("temperature", 1.5, 4.0),
             "rep_beta": trial.suggest_float("rep_beta", 0.0, 2.0),
 
-            # prior補正
-            "prior_tau": trial.suggest_float("prior_tau", 0.0, 1.0),
+            "prior_tau": trial.suggest_float("prior_tau", 0.0, 2.0),
 
-            # class weight緩和
-            "class_weight_power": trial.suggest_float("class_weight_power", 0.3, 0.6),
-            "class_weight_clip": trial.suggest_float("class_weight_clip", 1.2, 2.5),
+            "class_weight_power": trial.suggest_float("class_weight_power", 0.3, 1.0),
+            "class_weight_clip": trial.suggest_float("class_weight_clip", 1.5, 5.0),
 
-            # teacher強化（重いので控えめ）
-            "teacher_lr": trial.suggest_float("teacher_lr", 1e-5, 5e-5, log=True),
+            "teacher_lr": trial.suggest_float("teacher_lr", 5e-6, 5e-5, log=True),
             "teacher_weight_decay": trial.suggest_float("teacher_weight_decay", 0.0, 5e-2),
             "teacher_epochs": args.teacher_epochs,
             "teacher_label_smoothing": trial.suggest_float("teacher_label_smoothing", 0.0, 0.1),
@@ -1222,9 +1247,10 @@ def run_optuna_kfold(args, df_trainval: pd.DataFrame, tokenizer) -> Dict[str, An
             "teacher_classifier_dropout": trial.suggest_float("teacher_classifier_dropout", 0.0, 0.3),
             "teacher_attention_dropout_prob": args.teacher_attention_dropout_prob,
             "attention_probs_dropout_prob": args.attention_probs_dropout_prob,
+
+            "teacher_max_length": args.teacher_max_length,
         }
 
-        # LoRAはstudentのみ
         params["use_lora"] = bool(args.use_lora)
         params["lora_targets"] = args.lora_targets
         if params["use_lora"]:
@@ -1243,7 +1269,8 @@ def run_optuna_kfold(args, df_trainval: pd.DataFrame, tokenizer) -> Dict[str, An
         res = kfold_oof_train_eval(
             args=args,
             df_trainval=df_trainval,
-            tokenizer=tokenizer,
+            student_tokenizer=student_tokenizer,
+            teacher_tokenizer=teacher_tokenizer,
             trial_params=params,
             save_models=False,
             work_dir=tmp_dir,
@@ -1279,6 +1306,7 @@ def run_optuna_kfold(args, df_trainval: pd.DataFrame, tokenizer) -> Dict[str, An
     merged = {
         "epochs": args.epochs,
         "max_length": args.max_length,
+        "teacher_max_length": args.teacher_max_length,
         "lr_scheduler_type": args.lr_scheduler_type,
         "teacher_epochs": args.teacher_epochs,
         "teacher_attention_dropout_prob": args.teacher_attention_dropout_prob,
@@ -1302,7 +1330,12 @@ def parse_args():
 
     p.add_argument("--student_model_dir", type=str, required=True)
     p.add_argument("--teacher_base_dir", type=str, required=True)
-    p.add_argument("--tokenizer_dir", type=str, required=True)
+
+    # student tokenizer（従来のtokenizer_dir）
+    p.add_argument("--student_tokenizer_dir", type=str, required=True)
+
+    # teacher tokenizer（指定しなければteacher_base_dirを使う）
+    p.add_argument("--teacher_tokenizer_dir", type=str, default="")
 
     p.add_argument("--csv", type=str, required=True)
     p.add_argument("--test_ratio", type=float, default=0.2)
@@ -1318,6 +1351,8 @@ def parse_args():
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--epochs", type=int, default=3)
     p.add_argument("--max_length", type=int, default=512)
+    p.add_argument("--teacher_max_length", type=int, default=512)
+
     p.add_argument("--batch_size", type=int, default=16)
     p.add_argument("--grad_accum", type=int, default=1)
 
@@ -1379,8 +1414,11 @@ def main():
 
     must_dir(args.student_model_dir, "STUDENT_MODEL_DIR")
     must_dir(args.teacher_base_dir, "TEACHER_BASE_DIR")
-    must_dir(args.tokenizer_dir, "TOKENIZER_DIR")
+    must_dir(args.student_tokenizer_dir, "STUDENT_TOKENIZER_DIR")
     must_file(args.csv, "CSV")
+
+    if args.teacher_tokenizer_dir.strip() != "":
+        must_dir(args.teacher_tokenizer_dir, "TEACHER_TOKENIZER_DIR")
 
     if args.optuna_storage == "":
         args.optuna_storage = None
@@ -1388,15 +1426,16 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
     os.makedirs(args.study_dir, exist_ok=True)
 
-    tokenizer = AutoTokenizer.from_pretrained(args.tokenizer_dir, use_fast=True)
+    # tokenizer分離
+    student_tokenizer = AutoTokenizer.from_pretrained(args.student_tokenizer_dir, use_fast=True)
+    teacher_tok_src = args.teacher_tokenizer_dir if args.teacher_tokenizer_dir.strip() != "" else args.teacher_base_dir
+    teacher_tokenizer = AutoTokenizer.from_pretrained(teacher_tok_src, use_fast=True)
 
-    # testは固定分割
     df = load_df(args.csv)
     df_trainval, df_test = stratified_test_split(df, test_ratio=args.test_ratio, seed=args.seed)
 
-    # Optuna or single run
     if args.use_optuna:
-        best_info = run_optuna_kfold(args, df_trainval, tokenizer)
+        best_info = run_optuna_kfold(args, df_trainval, student_tokenizer, teacher_tokenizer)
         trial_params = best_info["merged_best_params"]
     else:
         trial_params = {
@@ -1425,6 +1464,7 @@ def main():
             "teacher_hidden_dropout_prob": args.teacher_hidden_dropout_prob,
             "teacher_classifier_dropout": args.teacher_classifier_dropout,
             "teacher_attention_dropout_prob": args.teacher_attention_dropout_prob,
+            "teacher_max_length": args.teacher_max_length,
             "use_lora": bool(args.use_lora),
             "lora_r": args.lora_r,
             "lora_alpha": args.lora_alpha,
@@ -1432,16 +1472,17 @@ def main():
             "lora_targets": args.lora_targets,
         }
 
-    # k-foldでOOF閾値を決める（最重要）
+    # k-foldでOOF閾値決定
     kfold_dir = os.path.join(args.output_dir, "kfold_oof")
     ensure_empty_dir(kfold_dir)
 
     res = kfold_oof_train_eval(
         args=args,
         df_trainval=df_trainval,
-        tokenizer=tokenizer,
+        student_tokenizer=student_tokenizer,
+        teacher_tokenizer=teacher_tokenizer,
         trial_params=trial_params,
-        save_models=False,  # ディスク節約。必要ならTrueにしてfoldモデル保存
+        save_models=False,
         work_dir=kfold_dir,
     )
 
@@ -1453,14 +1494,14 @@ def main():
     with open(os.path.join(args.output_dir, "chosen_threshold.json"), "w", encoding="utf-8") as f:
         json.dump({"fixed_threshold": best_thr, "prior_adjust": prior_adjust}, f, indent=2, ensure_ascii=False)
 
-    # 最終学習 & テスト評価（固定thr）
     if args.final_train_best:
         final_dir = os.path.join(args.output_dir, "final")
         test_metrics = final_train_and_test(
             args=args,
             df_trainval=df_trainval,
             df_test=df_test,
-            tokenizer=tokenizer,
+            student_tokenizer=student_tokenizer,
+            teacher_tokenizer=teacher_tokenizer,
             trial_params=trial_params,
             best_threshold=best_thr,
             prior_adjust=prior_adjust,
