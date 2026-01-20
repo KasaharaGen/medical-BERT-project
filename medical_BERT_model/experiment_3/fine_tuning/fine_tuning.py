@@ -1316,7 +1316,7 @@ def parse_args():
     p.add_argument("--val_ratio_for_final", type=float, default=0.1)
 
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--epochs", type=int, default=3)
+    p.add_argument("--epochs", type=int, default=5)
     p.add_argument("--max_length", type=int, default=512)
     p.add_argument("--batch_size", type=int, default=16)
     p.add_argument("--grad_accum", type=int, default=1)
